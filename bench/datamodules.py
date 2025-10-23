@@ -116,8 +116,18 @@ class PhysOscilDataModule(BaseSynthDataModule):
                          default_symbols=['dv_dt', 'x', 't', 'v'],
                          default_symbol_descs=['Acceleration in Nonl-linear Harmonic Oscillator', 'Position at time t', 'Time', 'Velocity at time t'])
 
+class DevCellDataModule(BaseSynthDataModule):
+    def __init__(self, root):
+        super().__init__("dev_cell", "DevCell", root,
+                         default_symbols=['dP_dt', 't', 'P'],
+                         default_symbol_descs=['Population growth rate', 'Time', 'Population at time t'])
+
+
 def get_datamodule(name, root_folder):
-    if name == 'bio_pop_growth':
+    if name == 'dev_cell':
+        root = root_folder or "datasets/lsr-synth-dev_cell"
+        return DevCellDataModule(root)
+    elif name == 'bio_pop_growth':
         root = root_folder or "datasets/lsr-synth-bio"
         return BioPopGrowthDataModule(root)
     elif name == 'chem_react':

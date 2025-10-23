@@ -13,12 +13,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 parser = ArgumentParser()
-parser.add_argument('--searcher_config', default="configs/llmsr_llama31_8b.yaml")
-parser.add_argument('--dataset', default="phys_osc")
+parser.add_argument('--searcher_config', type=str, required=True)
+parser.add_argument('--dataset', type=str, required=True)
 parser.add_argument('--ds_root_folder', type=str, default=None)
 parser.add_argument('--resume_from', type=str, default=None)
 parser.add_argument('--problem_name', type=str, default=None)
-parser.add_argument('--local_llm_port', type=str, default="10005")
+parser.add_argument('--local_llm_port', type=int, default=None)
 args = parser.parse_args()
 
 now = datetime.now()

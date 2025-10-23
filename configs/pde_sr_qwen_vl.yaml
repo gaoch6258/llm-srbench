@@ -1,0 +1,47 @@
+# Configuration for PDE Discovery using Qwen-VL Vision-Language Model
+# This extends LLM-SR to discover spatiotemporal PDEs from imaging data
+
+name: PDE-SR-Qwen-VL
+class_name: PDESearcher  # Will need to implement in methods/pde_sr/
+
+# API Configuration
+api_type: "vllm"
+api_model: "Qwen/Qwen2-VL-7B-Instruct"
+api_url: "http://localhost:8000/v1/"
+api_key: "EMPTY"
+
+# Discovery Parameters
+max_iterations: 20
+convergence_threshold: 0.95  # Score threshold (0-1) for early stopping
+plateau_patience: 5  # Iterations without improvement before stopping
+
+# Experience Buffer
+buffer_size: 100
+buffer_diversity_threshold: 0.3
+
+# PDE Solver Configuration
+solver:
+  dx: 1.0
+  dy: 1.0
+  dt: 0.01
+  boundary_condition: "periodic"  # 'periodic', 'neumann', 'dirichlet'
+  max_iterations: 1000
+  stability_check: true
+  diffusion_limit: 0.5
+
+# Parameter Fitting
+param_bounds:
+  α: [0.01, 5.0]   # Diffusion coefficient
+  χ: [0.01, 10.0]  # Chemotaxis sensitivity
+  β: [0.01, 5.0]   # Additional parameters
+
+# Visualization
+visualization:
+  figsize: [16, 12]
+  dpi: 100
+  save_all_iterations: true
+
+# Output
+output_dir: "./logs/pde_sr/"
+save_buffer: true
+save_visualizations: true

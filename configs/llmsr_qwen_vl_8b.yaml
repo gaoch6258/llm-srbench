@@ -1,7 +1,7 @@
-name: Llmsr-Llama31_8b
+name: Llmsr-Qwen-VL-8b
 class_name: LLMSRSearcher
 api_type: "vllm"
-api_model: "/mnt/hdd_raid5/gaoch/Llama-3.1-8B-Instruct"
+api_model: "/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct"
 api_url: "http://localhost:{}/v1/"
 global_max_sample_num: 1000
 samples_per_prompt: 4
