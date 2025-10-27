@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-PDE Discovery - AutoGen v0.4 Implementation
+PDE Discovery - AutoGen v0.4 Implementation (Refined)
 
 Features:
 - AutoGen v0.4 (autogen-agentchat) with AssistantAgent
-- Tool use with direct tool execution in AssistantAgent
+- Direct tool execution with proper form validation
 - TensorBoard logging for metrics tracking
 - Experience buffer with in-context learning
 - Asynchronous event-driven architecture
@@ -14,13 +14,19 @@ import argparse
 import json
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional, Dict, Any
 import numpy as np
 import asyncio
-
+import base64
+import urllib.request
+from PIL import Image as PILImage
 # TensorBoard
 from torch.utils.tensorboard import SummaryWriter
-
+import PIL
+import requests
+from autogen_agentchat.messages import MultiModalMessage
+from autogen_core import Image
+from autogen_core.model_context import BufferedChatCompletionContext
 # AutoGen v0.4
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import TextMessage
@@ -33,6 +39,161 @@ from bench.pde_datamodule import ChemotaxisDataModule
 from bench.pde_solver import PDESolver, PDEConfig
 from bench.pde_visualization import PDEVisualizer
 from bench.pde_experience_buffer import PDEExperienceBuffer
+from bench.pde_llmsr_solver import LLMSRPDESolver
+
+
+# PDE Discovery Guide - NO PRIORS, LET LLM DISCOVER
+SUPPORTED_FORMS_GUIDE = """
+PDE DISCOVERY TASK:
+
+You will discover spatiotemporal PDEs that govern the evolution of a density field g(x,y,t) given the chemoattractant field S(x,y).
+
+INPUT DATA:
+- g(x,y,t): Density field observations over space and time (H, W, T)
+- S(x,y): Signal/chemoattractant field (given, static or time-varying) (H, W, T)
+- Spatial grid: (H×W) with spacing dx, dy
+- Time steps: T with step dt
+- params: Array of parameters, e.g. [p0, p1, p2, ...]
+
+RETURN:
+- g_next: Updated density (H, W, T) at next time step (one-step roll out)
+
+
+YOUR TASK:
+Generate COMPLETE Python code for a PDE update function using scipy/numpy operators.
+
+FUNCTION SIGNATURE (MANDATORY):
+```python
+def pde_update(g: np.ndarray, S: np.ndarray, dx: float, dy: float, dt: float, params: np.ndarray) -> np.ndarray:
+    # At the beggining, you MUST give the symbolic form of this PDE in the commment (PDE FORM: ...), such as:
+    # PDE FORM: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
+    import numpy as np
+    import scipy.ndimage
+
+    # Extract parameters
+    p0 = params[0]  # e.g., diffusion strength
+    p1 = params[1]  # e.g., advection/chemotaxis strength
+    # ... define as many as needed
+
+    # Use scipy/numpy operators (calculate only the necessary term using numpy or scipy):
+    # Laplacian : laplacian_g = scipy.ndimage.laplace(g, axes=(0,1)) / (dx**2)
+    # Derivatives: dg_dx = np.gradient(g, dx, axis=0), dg_dy = np.gradient(g, dy, axis=1)
+
+
+    # Compute dg/dt according to your PDE
+    # dg_dt = p0 * laplacian(g) + p1 * some_other_term + ...
+
+    # Forward Euler: g_next = g + dt * dg_dt
+
+    return g_next
+```
+SHAPE SAFETY RULES:
+
+1. g and S are 3D: (H, W, T) - Height × Width × Time
+2; ALL intermediate variables MUST be (H, W, T)
+3. dg_dx = np.gradient(g, dx, axis=0) return only (H, W), should be stacked to get the gradient vector
+4. Laplacian: scipy.ndimage.laplace(g) / (dx**2) → (H,W,T)
+5. Element-wise ops (*, +, -) require matching shapes
+6. Final g_next MUST be (H, W, T)
+
+OPERATORS YOU CAN USE (via scipy.ndimage):
+- Laplacian Δ: scipy.ndimage.laplace(g, axes=(0,1)) / (dx**2)
+- Derivatives ∇: dg_dx = np.gradient(g, dx, axis=0), dg_dy = np.gradient(g, dy, axis=1)
+- Divergence ∇·(flux): compute flux components then their gradients
+- Nonlinear terms: g², g³, g·S, exp, ln, etc.
+- ANY mathematical combination
+
+EXAMPLES OF POSSIBLE PDE FORMS:
+- Pure diffusion: ∂g/∂t = D·Δg
+- With reaction: ∂g/∂t = D·Δg + r·g
+- With advection: ∂g/∂t = D·Δg - v·∇g
+- With chemotaxis: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
+- Nonlinear: ∂g/∂t = D·Δg + r·g·(1-g)
+- Complex: ∂g/∂t = D·Δg - χ·∇·(g·∇S) + r·g·(1-g/K)
+
+NUMBER OF PARAMETERS:
+- You decide how many parameters your PDE needs
+- Specify as num_params when calling evaluate_pde_tool
+- More parameters = more flexible but harder to fit
+- Typical range: 1-5 parameters
+
+SCORING:
+- High R² (>0.9): Good fit to observations
+- Low mass error (<5%): Conserves total mass
+- Visual assessment: Spatial patterns match
+
+CRITICAL:
+- At the beggining, you MUST give the symbolic form of this PDE in the commment (PDE FORM: ...)
+- You can comment the intermediate variables' shape to avoid shape errors.
+- You should pay attention on the shape, the term that multiply/add/subtract should have the same shape
+- Generate COMPLETE pde_update() function code
+- Use scipy/numpy for all spatial operators (Laplacian, gradients, etc.)
+- Discover the governing equation from data
+- Be creative with parameter combinations
+- Try diverse PDE structures
+"""
+
+
+# AsyncLLMClient - moved to module level so it can be pickled
+class AsyncLLMClient:
+    """Async-compatible LLM client wrapper for LLMSR"""
+    def __init__(self, model_client):
+        self.model_client = model_client
+
+    def generate(self, prompt):
+        """Synchronous wrapper that handles async properly
+
+        This can be called from:
+        1. Subprocess workers (multiprocessing) - no event loop, create one
+        2. Async context (main process) - use existing loop with asyncio.run_coroutine_threadsafe
+        """
+        import asyncio
+        import threading
+        from autogen_agentchat.messages import UserMessage
+        from autogen_core import CancellationToken
+
+        async def _async_generate():
+            # Use proper message format for AutoGen v0.4
+            response = await self.model_client.create(
+                messages=[UserMessage(content=prompt, source="user")],
+                cancellation_token=CancellationToken()
+            )
+            return response.content
+
+        # Check if we're in an async context
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in async context - need to run in thread pool to avoid blocking
+            # Use run_in_executor to run the async function
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Create a new event loop in thread
+                def run_in_thread():
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(_async_generate())
+                        return result
+                    finally:
+                        new_loop.close()
+
+                future = executor.submit(run_in_thread)
+                result = future.result(timeout=120)  # 2 minute timeout
+                return result
+
+        except RuntimeError as e:
+            if "no running event loop" in str(e).lower() or "no current event loop" in str(e).lower():
+                # Good - no running loop. We're in subprocess. Create one.
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(_async_generate())
+                    return result
+                finally:
+                    loop.close()
+            else:
+                # Some other RuntimeError - re-raise it
+                raise
 
 
 class PDEDiscoveryAutogenV04:
@@ -44,6 +205,7 @@ class PDEDiscoveryAutogenV04:
         self,
         api_base: str = "http://localhost:10005/v1",
         api_model: str = "/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct",
+        critic_model: Optional[str] = None,
         max_iterations: int = 8000,
         samples_per_prompt: int = 4,
         convergence_threshold: float = 0.98,
@@ -53,15 +215,24 @@ class PDEDiscoveryAutogenV04:
     ):
         self.api_base = api_base
         self.api_model = api_model
+        self.critic_model = critic_model or api_model
         self.max_iterations = max_iterations
         self.samples_per_prompt = samples_per_prompt
         self.convergence_threshold = convergence_threshold
         self.plateau_patience = plateau_patience
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.viz_dir = self.output_dir / "visuals"
+        self.viz_dir.mkdir(parents=True, exist_ok=True)
 
         # Components
-        self.solver = PDESolver(solver_config or PDEConfig())
+        config = solver_config or PDEConfig()
+        self.solver = PDESolver(config)  # Keep for metrics computation
+
+        # NEW: Pure LLMSR-style solver - LLM generates code directly
+        # We'll create a simple LLM client wrapper
+        self.llmsr_solver = None  # Will be initialized when we have model_client
+
         self.visualizer = PDEVisualizer()
         self.buffer = PDEExperienceBuffer(max_size=200)
 
@@ -73,9 +244,15 @@ class PDEDiscoveryAutogenV04:
         self.current_problem = None
         self.best_score = -float('inf')
         self.best_equation = None
+        self.numerical_best_score = -float('inf')
+        self.numerical_best_equation = None
         self.plateau_counter = 0
         self.iteration = 0
+        self.eval_counter = 0  # counts tool calls to build unique filenames
 
+        # Scoring weights
+        self.visual_weight = 0.30  # weight on visual critic score (0-10)
+        self.eval_max_steps = 200
         # Setup
         self._setup_model_client()
 
@@ -87,8 +264,9 @@ class PDEDiscoveryAutogenV04:
             model=self.api_model,
             base_url=self.api_base,
             api_key="EMPTY",  # vLLM doesn't require real API key
+            max_tokens=30000,
             model_info={
-                "vision": False,
+                "vision": True,  # FIXED: Enable vision for visual critic
                 "function_calling": True,
                 "json_output": True,
                 "family": ModelFamily.UNKNOWN,
@@ -97,15 +275,31 @@ class PDEDiscoveryAutogenV04:
         )
         print(f"✓ Model client initialized: {self.api_model}")
 
-    def evaluate_pde_tool(
+        # Create LLMSR solver with async-compatible LLM client wrapper
+        # Use module-level AsyncLLMClient (defined at top of file, can be pickled)
+        llm_client = AsyncLLMClient(self.model_client)
+
+        self.llmsr_solver = LLMSRPDESolver(
+            llm_client=llm_client,
+            dx=1.0,
+            dy=1.0,
+            dt=0.01,
+            timeout=60  # Longer timeout for code generation
+        )
+        print(f"✓ LLMSR solver initialized with LLM code generation")
+
+    # Deprecated HTTP critic removed; we use critic_agent in discover()
+
+    def evaluate_pde(
         self,
-        equation: Annotated[str, "The PDE equation string to evaluate, e.g., 'α·Δg - β·∇·(g∇(ln S))'"]
+        pde_code: Annotated[str, "Complete Python code for pde_update function"],
+        num_params: Annotated[int, "Number of parameters in params array"] = 2
     ) -> str:
         """
-        Tool function: Evaluate PDE candidate
+        Tool function: Evaluate PDE candidate code directly
 
-        This tool fits parameters and computes metrics for a given PDE equation.
-        Returns a JSON string with results.
+        The agent provides complete pde_update() function code.
+        Parameters are fit to data automatically.
         """
         try:
             if self.current_problem is None:
@@ -113,107 +307,184 @@ class PDEDiscoveryAutogenV04:
 
             problem = self.current_problem
 
-            param_bounds = {
-                'α': (0.01, 3.0),
-                'β': (0.01, 3.0),
-                'γ': (0.001, 1.0),
-                'K': (0.5, 10.0)
-            }
+            # Parameter bounds - generic for any number of params
+            param_bounds = [(0.001, 5.0) for _ in range(num_params)]
 
-            # Fit parameters
-            fitted_params, loss = self.solver.fit_pde_parameters(
-                equation, problem.g_init, problem.S, problem.g_observed,
-                param_bounds=param_bounds
+            # Directly use the provided code (agent generates it)
+            # No intermediate LLM call - agent IS the LLM!
+            code = pde_code
+
+            # Fit parameters and evaluate using the code
+            from scipy import optimize
+
+            # Fast objective: match dg/dt across all time steps (vectorized)
+            g_series = problem.g_observed
+            dt_meta = float(problem.metadata.get('dt', 0.01))
+
+            last_obj_error: Optional[str] = None
+            def objective(params):
+                nonlocal last_obj_error
+                g_pred, dgdt_pred, success, error = self.llmsr_solver.evaluate_pde_dgdt(
+                    code, g_series, problem.S, params
+                )
+                if not success or dgdt_pred is None:
+                    last_obj_error = str(error)
+                    if getattr(self, 'verbose_debug', False):
+                        print(f"[Objective] dgdt eval failed: {last_obj_error}")
+                    return 1e10
+                dgdt_obs = (g_series[:, :, 1:] - g_series[:, :, :-1]) / dt_meta
+                return float(np.mean((dgdt_pred - dgdt_obs) ** 2))
+
+            # Initial guess: midpoint of bounds
+            x0 = [(b[0] + b[1]) / 2 for b in param_bounds]
+            result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=param_bounds)
+            fitted_params_list = result.x
+            loss = result.fun
+            steps_roll = min(g_series.shape[2], self.eval_max_steps)
+            rollout_pred, rsuccess, rerror = self.llmsr_solver.evaluate_pde(
+                code, problem.g_init, problem.S, fitted_params_list, steps_roll
             )
 
-            # Evaluate with fitted parameters
-            predicted, info = self.solver.evaluate_pde(
-                equation, problem.g_init, problem.S, fitted_params,
-                num_steps=problem.g_observed.shape[2]
+            if rsuccess and rollout_pred is not None:
+                g_obs_roll = g_series[:, :, :steps_roll]
+                predicted_for_viz = rollout_pred
+            else:
+                if getattr(self, 'verbose_debug', False):
+                    print(f"[Rollout] evaluate_pde failed: {rerror}")
+                # Fallback to one-step (teacher-forced) sequence
+                g_obs_roll = g_series
+                # Make sure we have g_pred; recompute quickly if needed
+                if 'g_pred' not in locals() or g_pred is None:
+                    g_pred, _, _, _ = self.llmsr_solver.evaluate_pde_dgdt(
+                        code, g_series, problem.S, fitted_params_list
+                    )
+                predicted_for_viz = g_pred if g_pred is not None else g_series.copy()
+
+            # R² on rollout/fallback
+            ss_res = np.sum((g_obs_roll - predicted_for_viz) ** 2)
+            ss_tot = np.sum((g_obs_roll - g_obs_roll.mean()) ** 2)
+            r2 = float(1 - ss_res / (ss_tot + 1e-10)) if ss_tot > 0 else 0.0
+
+            # Mass error final frame
+            final_mass_pred = float(predicted_for_viz[:, :, -1].sum())
+            final_mass_obs = float(g_obs_roll[:, :, -1].sum())
+            mass_error = float(abs(final_mass_pred - final_mass_obs) / (final_mass_obs + 1e-8) * 100)
+
+            fitted_params = {f'p{i}': val for i, val in enumerate(fitted_params_list)}
+
+            # NMSE on rollout/fallback
+            nmse = float(self.solver.compute_spatiotemporal_loss(predicted_for_viz, g_obs_roll, 'nmse'))
+
+            # Combined numerical score from R^2 (rollout) and MSE (dg/dt objective)
+            # - r2_score in [0,1]
+            # - mse_score = 1 / (1 + normalized_mse) where normalized by dg/dt energy
+            r2_score = max(0.0, min(1.0, float(r2)))
+            # Recompute observed dg/dt to scale MSE robustly
+            dgdt_obs_full = (g_series[:, :, 1:] - g_series[:, :, :-1]) / dt_meta
+            dgdt_scale = float(np.mean(dgdt_obs_full ** 2)) + 1e-8
+            mse_norm = float(loss) / dgdt_scale
+            mse_score = 1.0 / (1.0 + mse_norm)
+            # Blend weights (can be tuned)
+            w_r2 = 0.5
+            blended = w_r2 * r2_score + (1.0 - w_r2) * mse_score
+            # Apply mass penalty and scale to [0,10]
+            mass_penalty = (1 - min(mass_error / 100.0, 0.5))
+            numerical_score = max(0.0, min(10.0, 10.0 * blended * mass_penalty))
+
+            # Always generate visualization for critic
+            self.eval_counter += 1
+            viz_path = self.viz_dir / f"iter_{self.iteration:06d}_eval_{self.eval_counter:04d}.png"
+
+            # Search for the first PDE FORM comment in the code (before \n)
+
+            import re
+            code_summary = re.search(r'# PDE FORM: (.*)', code).group(1).split('\n')[0].strip()
+            if code_summary is None:
+                code_summary = code
+
+            self.visualizer.create_critique_visualization(
+                g_obs_roll, predicted_for_viz,
+                code_summary, {'mse': loss, 'r2': r2, 'nmse': nmse, 'mass_error': mass_error},
+                save_path=str(viz_path)
             )
 
-            # Compute metrics
-            mse = float(self.solver.compute_spatiotemporal_loss(predicted, problem.g_observed, 'mse'))
-            r2 = float(self.solver.compute_spatiotemporal_loss(predicted, problem.g_observed, 'r2'))
-            nmse = float(self.solver.compute_spatiotemporal_loss(predicted, problem.g_observed, 'nmse'))
-
-            obs_mass = np.sum(problem.g_observed, axis=(0, 1))
-            pred_mass = np.sum(predicted, axis=(0, 1))
-            mass_error = float(np.abs(pred_mass[-1] - obs_mass[-1]) / obs_mass[-1] * 100)
-
-            # Composite score
-            score = r2 * 10 * (1 - min(mass_error / 100, 0.5))
+            # Do not run visual critic here; discover() will use critic_agent with the saved viz
 
             # Log to TensorBoard
             if self.writer:
-                self.writer.add_scalar('metrics/score', score, self.iteration)
+                self.writer.add_scalar('metrics/score', numerical_score, self.iteration)
                 self.writer.add_scalar('metrics/r2', r2, self.iteration)
-                self.writer.add_scalar('metrics/mse', mse, self.iteration)
+                self.writer.add_scalar('metrics/mse', loss, self.iteration)
                 self.writer.add_scalar('metrics/mass_error', mass_error, self.iteration)
 
-            # Add to buffer
-            self.buffer.add(
-                equation=equation,
-                score=score,
-                metrics={'mse': mse, 'r2': r2, 'nmse': nmse, 'mass_error': mass_error},
-                visual_analysis="",
-                reasoning="",
-                suggestions="",
-                parameters=fitted_params
-            )
+            # Buffer add deferred to after visual critic
 
-            # Update best
-            if score > self.best_score:
-                self.best_score = score
-                self.best_equation = equation
-                self.plateau_counter = 0
+            # Optional debug print for each evaluation
+            if getattr(self, 'verbose_debug', False):
+                print(f"[Eval] Iter {self.iteration} code: {code_summary} | Num={numerical_score:.2f}")
+
+            # # Update best
+            if numerical_score > self.numerical_best_score:
+                self.numerical_best_score = numerical_score
+                self.numerical_best_equation = code_summary  # Store code summary
 
                 if self.writer:
-                    self.writer.add_scalar('best/score', score, self.iteration)
-                    self.writer.add_scalar('best/r2', r2, self.iteration)
+                    self.writer.add_scalar('num_best/score', numerical_score, self.iteration)
+                    self.writer.add_scalar('num_best/r2', r2, self.iteration)
+                    self.writer.add_scalar('num_best/mse', loss, self.iteration)
+                    self.writer.add_scalar('num_best/nmse', nmse, self.iteration)
+                    self.writer.add_scalar('num_best/mass_error', mass_error, self.iteration)
 
-                # Save visualization every 200 iterations
-                if self.iteration % 200 == 0:
-                    viz_path = self.output_dir / f"best_iter_{self.iteration:06d}.png"
-                    self.visualizer.create_critique_visualization(
-                        problem.g_observed, predicted,
-                        equation, {'mse': mse, 'r2': r2, 'nmse': nmse, 'mass_error': mass_error},
-                        save_path=str(viz_path)
-                    )
-                    if self.writer:
-                        try:
-                            from PIL import Image
-                            import torchvision.transforms as transforms
-                            img = Image.open(viz_path)
-                            img_tensor = transforms.ToTensor()(img)
-                            self.writer.add_image('visualizations/best', img_tensor, self.iteration)
-                        except:
-                            pass
+                print(f"\n🎯 Iter {self.iteration}: NEW BEST (numerical)! Num={numerical_score:.4f} R²={r2:.4f}")
+                print(f"   Code: {code_summary}")
+                print(f"   Ground Truth: {problem.gt_equation}")
+                print(f"   Params: {fitted_params}")
 
-                print(f"\n🎯 Iter {self.iteration}: NEW BEST! Score={score:.4f}, R²={r2:.4f}")
-                print(f"   Equation: {equation[:100]}...")
-            else:
-                self.plateau_counter += 1
 
-            result = {
+            result_dict = {
                 'success': True,
-                'score': float(score),
+                'score': float(numerical_score),  # numerical score (backward-compat)
+                'numerical_score': float(numerical_score),
                 'r2': float(r2),
-                'mse': float(mse),
+                'mse': float(loss),
+                'nmse': float(nmse),
                 'mass_error': float(mass_error),
-                'fitted_params': {k: float(v) for k, v in fitted_params.items()},
-                'message': f"✓ Evaluated! Score: {score:.4f}, R²: {r2:.4f}, MSE: {mse:.6f}, Mass Error: {mass_error:.2f}%"
+                'fitted_params': fitted_params,
+                'num_params': num_params,
+                'visual_score': None,
+                'combined_score': None,
+                'visualization_path': str(viz_path),
+                'visual_summary': None,
+                'code_preview': code[:2500] if len(code) > 2500 else code,
+                'PDE': code_summary,
+                'last_objective_error': last_obj_error,
+                'rollout_error': rerror if not rsuccess else None,
+                'critic': None,
+                'message': (
+                    f"✓ Numerical={numerical_score:.2f} [AGENT-CODE]. R²={r2:.4f}, MSE={loss:.6f}, MassErr={mass_error:.2f}%.\n"
+                    "Next: use critic_agent with viz_path for visual analysis."
+                )
             }
 
-            return json.dumps(result)
+            return json.dumps(result_dict)
 
         except Exception as e:
+            import traceback
+            error_msg = str(e)
+            # Provide more helpful error messages
+            if "not yet supported" in error_msg.lower():
+                error_msg = f"PDE form not supported. {error_msg}\n\nPlease use only supported forms:\n{SUPPORTED_FORMS_GUIDE}"
+
             error_result = {
                 'success': False,
-                'error': str(e),
+                'error': error_msg,
                 'score': 0.0,
-                'message': f"✗ Evaluation failed: {str(e)}"
+                'message': f"✗ Evaluation failed: {error_msg}"
             }
+            if getattr(self, 'verbose_debug', False):
+                print(f"[Eval Error] PDE evaluation failed")
+                print(f"  Error: {error_msg}")
+                traceback.print_exc()
             return json.dumps(error_result)
 
     async def discover(self, problem, verbose: bool = True):
@@ -221,6 +492,8 @@ class PDEDiscoveryAutogenV04:
 
         self.current_problem = problem
         H, W, T = problem.g_observed.shape
+        # Enable class-wide debug printing for tool if verbose
+        self.verbose_debug = bool(verbose)
 
         data_summary = {
             'shape': f"({H}, {W}, {T})",
@@ -245,87 +518,269 @@ class PDEDiscoveryAutogenV04:
             print("\n" + "="*70)
             print("PDE DISCOVERY - AUTOGEN V0.4")
             print("="*70)
+
+        # Ensure LLMSR solver uses dataset's dx, dy, dt (avoid mismatch)
+        try:
+            self.llmsr_solver.dx = float(data_summary['dx'])
+            self.llmsr_solver.dy = float(data_summary['dy'])
+            self.llmsr_solver.dt = float(data_summary['dt'])
+            if verbose:
+                print(f"[Debug] LLMSR solver grid set: dx={self.llmsr_solver.dx}, dy={self.llmsr_solver.dy}, dt={self.llmsr_solver.dt}")
+        except Exception as _e:
+            if verbose:
+                print(f"[Warn] Failed to set LLMSR solver grid from metadata: {_e}")
             print(f"Dataset: {data_summary['shape']}")
             print(f"Max iterations: {self.max_iterations}")
             print(f"Ground Truth: {problem.gt_equation}")
             print(f"Mass change: {data_summary['mass_change_pct']:.2f}%")
             print("="*70)
 
-        # Create AssistantAgent with evaluate_pde_tool
-        assistant = AssistantAgent(
+        # Build PDE Generator agent with tool
+        generator_agent = AssistantAgent(
             name="PDE_Generator",
             model_client=self.model_client,
-            tools=[self.evaluate_pde_tool],
-            reflect_on_tool_use=True,  # Reflect on tool results
-            system_message=f"""You are an expert in mathematical biology and PDE modeling.
-Your task is to discover PDEs for chemotaxis phenomena from spatiotemporal data.
+            model_context=BufferedChatCompletionContext(buffer_size=2),
+            tools=[],
+            system_message=f"""You are an expert at discovering spatiotemporal PDEs from observational data.
 
-DATA SUMMARY:
-- Grid: {data_summary['shape']} (Height × Width × Time)
-- Cell density: [{data_summary['g_min']:.4f}, {data_summary['g_max']:.4f}]
-- Mass change: {data_summary['mass_change_pct']:.2f}%
-- Attractant S: [{data_summary['S_min']:.4f}, {data_summary['S_max']:.4f}]
+{SUPPORTED_FORMS_GUIDE}
 
-AVAILABLE OPERATORS:
-- ∇ (gradient)
-- ∇· (divergence)
-- Δ (Laplacian = ∇²)
-- ∂/∂t (time derivative)
-- ln (natural logarithm)
+YOUR TASK:
+You generate PDE hypotheses and get them evaluated. A Visual Critic will analyze the results.
 
-CHEMOTAXIS TERMS TO CONSIDER:
-1. Diffusion: α·Δg (random motion)
-2. Chemotaxis: -β·∇·(g∇(ln S)) or -β·∇·(g∇S) (directed motion)
-3. Growth: γ·g(1-g/K) (logistic growth)
+For each round, propose {self.samples_per_prompt} DIVERSE PDE hypotheses as complete Python code.
 
-OUTPUT FORMAT:
-Propose PDE equations in the form: ∂g/∂t = [right-hand side]
 
-INSTRUCTIONS:
-1. Generate {self.samples_per_prompt} diverse PDE candidates
-2. For EACH candidate, call evaluate_pde(equation="your_pde") tool
-3. Analyze the results (score, R², mass error)
-4. Propose refined candidates based on previous results
-5. Try different operator combinations
-6. Explore parameter-free forms first, parameters will be fitted automatically
+CRITICAL RULES:
+1. Generate complete pde_update() function code using scipy.ndimage for operators
+2. Focus on moderately optimizing the best candidate, instead of involving too many terms. The generated PDE MUST have less than 6 term 
+3. Try DIVERSE hypotheses each round (diffusion, reaction, advection, nonlinear, etc.)
+4. Wait for Visual Critic feedback before proposing next batch
+6. Focus on: High R² (>0.9), Low mass error (<5%), High visual score
+7. You MUST comment the intermediate variables' shape to avoid errors.
+8. At the beginning, you MUST comment the PDE FORM in the code.
 
-Generate creative and diverse PDEs!""",
+WORKFLOW PER ROUND:
+1. Propose {self.samples_per_prompt} DIFFERENT PDE code implementations
+2. Wait for Visual Critic analysis
+3. Learn from critic feedback and propose better hypotheses next round
+""",
         )
+
+        # Build Visual Critic agent (vision-enabled)
+        critic_agent = AssistantAgent(
+            name="Visual_Critic",
+            model_client=self.model_client,
+            model_context=BufferedChatCompletionContext(buffer_size=2),
+            tools=[],
+            system_message="""You are a Visual Critic specialized in analyzing PDE simulation results.
+
+YOUR TASK:
+Analyze the visualization plots and evaluation metrics for PDE candidates.
+Provide constructive feedback to the PDE_Generator.
+
+ANALYSIS FOCUS:
+1. Spatial pattern accuracy (do predicted patterns match observations?)
+2. Temporal evolution (does the dynamics match over time?)
+3. Mass conservation (is total mass preserved?)
+4. Boundary behavior (proper handling of domain edges?)
+5. Physical plausibility (makes sense for the system?)
+
+FEEDBACK FORMAT:
+For each evaluated PDE, provide:
+- Key observations about what works/doesn't work
+- Specific suggestions for improvement (e.g., "increase diffusion", "add reaction term")
+- Ranking of current batch (which was best and why)
+- Direction for next iteration
+
+Be concise but specific. Focus on actionable feedback.""",
+        )
+        # Expose critic_agent to tools if needed
+        self.critic_agent = critic_agent
 
         # Discovery loop
         for iteration in range(1, self.max_iterations + 1):
             self.iteration = iteration
             iter_start = time.time()
 
-            # Get top-5 experience context
-            experience_context = self.buffer.format_for_prompt(k=3, include_visual=True)
+            # Get top-3 experience context (include visual feedback)
+            experience_context = self.buffer.format_for_prompt(k=3, include_visual=False)
 
-            # Create prompt with context
+            # Create task for this round - directed at Generator
             if experience_context:
-                prompt_with_context = f"""Generate {self.samples_per_prompt} NEW PDE candidates and evaluate them.
+                task_text = f"""
+DATA SUMMARY:
+- Grid: {data_summary['shape']} (H×W×T), mass change: {data_summary['mass_change_pct']:.2f}%
 
-PREVIOUS TOP RESULTS:
+PREVIOUS TOP RESULTS (with Visual Critic):
 {experience_context}
 
-Learn from these results and propose IMPROVED or DIFFERENT candidates.
-Call evaluate_pde for each candidate."""
+PDE_Generator: Generate {self.samples_per_prompt} new DIVERSE PDE code implementations and evaluate each.
+Learn from previous results and visual critic feedback. Generate COMPLETE pde_update() functions using scipy.ndimage operators.
+"""
             else:
-                prompt_with_context = f"Generate {self.samples_per_prompt} diverse PDE candidates and evaluate each using evaluate_pde tool."
+                task_text = f"""
+DATA SUMMARY:
+- Grid: {data_summary['shape']} (H×W×T), mass change: {data_summary['mass_change_pct']:.2f}%
 
-            # Run assistant
+First round - PDE_Generator, please explore diverse PDE hypotheses:
+- Try {self.samples_per_prompt} DIFFERENT PDE implementations as complete Python code
+- Vary complexity (1-5 parameters)
+- Use scipy.ndimage for Laplacian, gradients, etc.
+- Examples: pure diffusion, diffusion+reaction, diffusion+chemotaxis, nonlinear terms
+- DO NOT assume any specific form - let the data guide you!
+"""
+
+            # Phase 1: Generator proposes and evaluates PDEs
             try:
                 cancellation_token = CancellationToken()
-                response = await assistant.on_messages(
-                    [TextMessage(content=prompt_with_context, source="user")],
-                    cancellation_token
+                prev_buf_size = len(self.buffer)
+
+                # Generator generates and evaluates
+                generator_result = await generator_agent.on_messages(
+                    [TextMessage(content=task_text, source="user")],
+                    cancellation_token=cancellation_token
                 )
 
-                if verbose and iteration % 2 == 0:
-                    print(f"\n[Iter {iteration}] Agent response: {response.chat_message.content[:200]}...")
+                if verbose:
+                    try:
+                        content = getattr(generator_result.chat_message, 'content', '')
+                        # print(f"\n[Iter {iteration}] Generator response preview: {str(content)}")
+                    except Exception as _e:
+                        print(f"[Debug] Failed to print response: {_e}")
+
+                # Parse generator response and extract pde_update codes
+                try:
+                    response_content = getattr(generator_result.chat_message, 'content', '')
+                    # Extract all code blocks between ```python and ```
+                    import re
+                    code_pattern = r'```python\s*(.*?)```'
+                    code_blocks = re.findall(code_pattern, response_content, re.DOTALL)
+                    eval_results = []
+                    
+                    if verbose:
+                        print(f"\n[Iter {iteration}] Extracted {len(code_blocks)} code blocks from generator")
+                    # Evaluate each extracted pde_update code
+                    for idx, pde_code in enumerate(code_blocks):                        
+                        # Try to infer parameter count by looking for params[0], params[1], etc.
+                        param_usage = re.findall(r'params\[(\d+)\]', pde_code)
+                        if param_usage:
+                            num_params = max([int(i) for i in param_usage]) + 1
+                        
+                        if verbose:
+                            print(f"\n[Iter {iteration}] Evaluating PDE #{idx+1}/{len(code_blocks)} (num_params={num_params})")
+                        
+                        # Call evaluate_pde_tool
+                        eval_result = json.loads(self.evaluate_pde(pde_code, num_params=num_params))
+                        eval_results.append(eval_result)
+                        if verbose:
+                            try:
+                                score = eval_result.get('score', 0)
+                                print(f"[Iter {iteration}] PDE #{idx+1} {eval_result.get('PDE', '')} evaluated: Score={score:.4f}")
+                            except:
+                                print(f"[Iter {iteration}] PDE #{idx+1} {eval_result.get('PDE', '')} evaluated")
+                
+                except Exception as parse_e:
+                    if verbose:
+                        print(f"[Iter {iteration}] Failed to parse generator response: {parse_e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Phase 2: Visual Critic analyzes each evaluated PDE (per-image, multimodal)
+                # For each eval, call critic_agent with image and metrics, then update buffer
+            
+                for idx, eval_result in enumerate(eval_results, 1):
+                    try:
+                        viz_path = eval_result.get('visualization_path')
+                        pde_equation = eval_result.get('PDE', '')
+                        code_preview = eval_result.get('code_preview', '')
+                        metrics = eval_result.get('metrics', {})
+                        # Build multimodal message
+                        img = PILImage.open(viz_path) if viz_path and Path(viz_path).exists() else None
+                        if img is None:
+                            if verbose:
+                                print(f"[Critic] Missing viz image for eval #{idx}, skipping visual analysis")
+                            continue
+                        mm = MultiModalMessage(
+                            content=[
+                                (
+                                    "Analyze the PDE simulation visualization (pred vs obs). Return JSON: "
+                                    "{score:0-10, spatial_analysis, temporal_analysis, boundary_analysis, "
+                                    "conservation_assessment, suggestions}.\n"
+                                    f"Code: {code_preview}\n"
+                                    f"Metrics: {metrics}"
+                                ),
+                                Image(img),
+                            ],
+                            source="user",
+                        )
+                        result = await critic_agent.run(task=mm)
+                        content = result.messages[-1].content
+                        try:
+                            cj = json.loads(content)
+                        except Exception:
+                            cj = {'freeform': content}
+
+                        visual_score = cj.get('score') if isinstance(cj, dict) else None
+                        spatial = cj.get('spatial_analysis', '') if isinstance(cj, dict) else ''
+                        temporal = cj.get('temporal_analysis', '') if isinstance(cj, dict) else ''
+                        boundary = cj.get('boundary_analysis', '') if isinstance(cj, dict) else ''
+                        conservation = cj.get('conservation_assessment', '') if isinstance(cj, dict) else ''
+                        suggestions = cj.get('suggestions', []) if isinstance(cj, dict) else []
+                        if isinstance(suggestions, str):
+                            suggestions = [suggestions]
+
+                        visual_summary = (
+                            f"Visual Critic (score {visual_score}/10)\n"
+                            + (f"- Spatial: {spatial[:250]}\n" if spatial else "")
+                            + (f"- Temporal: {temporal[:250]}\n" if temporal else "")
+                            + (f"- Boundary: {boundary[:250]}\n" if boundary else "")
+                            + (f"- Conservation: {conservation[:250]}\n" if conservation else "")
+                            + (f"- Key Issue: {suggestions if suggestions else 'None'}\n")
+                        )
+
+                        # Combine scores
+                        num_score = eval_result.get('numerical_score', 0.0)
+                        w = self.visual_weight
+                        combined = float((1.0 - w) * float(num_score) + w * float(visual_score)) if isinstance(visual_score, (int, float)) else float(num_score)
+
+                        # Add to buffer
+                        self.buffer.add(
+                            equation=eval_result.get('code_preview', ''),
+                            score=float(num_score),
+                            metrics={
+                                'mse': eval_result.get('mse'), 'r2': eval_result.get('r2'), 'nmse': eval_result.get('nmse'), 'mass_error': eval_result.get('mass_error'),
+                                'visual_score': visual_score, 'combined_score': combined
+                            },
+                            visual_analysis=visual_summary,
+                            reasoning="Agent-generated code",
+                            suggestions='; '.join(suggestions),
+                            parameters=metrics.get('fitted_params', {}),
+                            visualization_path=viz_path,
+                            spatial_assessment=spatial,
+                            temporal_assessment=temporal,
+                            visual_score=visual_score,
+                            combined_score=combined,
+                        )
+
+                        # Update best with combined
+                        # if combined > self.best_score:
+                        #     self.best_score = combined
+                        #     self.best_equation = pde_equation
+                        #     self.plateau_counter = 0
+                        #     if self.writer:
+                        #         self.writer.add_scalar('best/combined_score', combined, self.iteration)
+                        #     if verbose:
+                        #         print(f"[Iter {iteration}] NEW BEST combined={combined:.2f} (num={num_score:.2f}, vis={visual_score})")
+                    except Exception as ce:
+                        if verbose:
+                            print(f"[Critic] Failed to analyze eval #{idx}: {ce}")
 
             except Exception as e:
                 if verbose:
                     print(f"Iteration {iteration} failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                 continue
 
             # Log iteration time
@@ -336,18 +791,19 @@ Call evaluate_pde for each candidate."""
                 self.writer.add_scalar('performance/plateau_counter', self.plateau_counter, iteration)
 
             # Progress reporting
-            if verbose and iteration % 100 == 0:
+            if verbose and iteration % 1 == 0:
                 elapsed = time.time() - start_time
                 print(f"\n{'='*70}")
                 print(f"Progress: Iteration {iteration}/{self.max_iterations}")
-                print(f"Best Score: {self.best_score:.4f} | Plateau: {self.plateau_counter}/{self.plateau_patience}")
+                print(f"Numerical Best Score: {self.numerical_best_score:.4f} | Plateau: {self.plateau_counter}/{self.plateau_patience}")
                 print(f"Buffer Size: {len(self.buffer)} PDEs | Elapsed: {elapsed:.1f}s")
-                if self.best_equation:
-                    print(f"Best Equation: {self.best_equation[:80]}...")
+                if self.numerical_best_equation:
+                    print(f"Numerical Best Equation: {self.numerical_best_equation}")
+                    print(f"Ground Truth: {problem.gt_equation}")
                 print(f"{'='*70}")
 
-            # Convergence check
-            if self.best_score >= self.convergence_threshold * 10:
+            # Convergence check (combined score scaled to 0-10)
+            if self.numerical_best_score >= self.convergence_threshold * 10:
                 if verbose:
                     print(f"\n✓ CONVERGED at iteration {iteration}!")
                 break
@@ -361,9 +817,9 @@ Call evaluate_pde for each candidate."""
 
         # Save final results
         results = {
-            'success': self.best_equation is not None,
-            'best_equation': self.best_equation,
-            'best_score': float(self.best_score),
+            'success': self.numerical_best_equation is not None,
+            'numerical_best_equation': self.numerical_best_equation,
+            'numerical_best_score': float(self.numerical_best_score),
             'total_iterations': iteration,
             'total_time': total_time,
             'buffer_stats': self.buffer.get_statistics(),
@@ -388,8 +844,8 @@ Call evaluate_pde for each candidate."""
             print("\n" + "="*70)
             print("DISCOVERY COMPLETE")
             print("="*70)
-            print(f"Best Equation: {self.best_equation}")
-            print(f"Best Score: {self.best_score:.4f}")
+            print(f"Numerical Best Equation: {self.numerical_best_equation}")
+            print(f"Numerical Best Score: {self.numerical_best_score:.4f}")
             print(f"Total Iterations: {iteration}")
             print(f"Total Time: {total_time:.1f}s ({total_time/3600:.2f} hours)")
             print(f"Results saved to: {results_path}")
@@ -402,12 +858,13 @@ Call evaluate_pde for each candidate."""
 
 async def main_async():
     parser = argparse.ArgumentParser(description="PDE Discovery - AutoGen v0.4")
-    parser.add_argument('--dataset', type=str, required=True, help='Path to HDF5 dataset')
+    parser.add_argument('--dataset', type=str, default='logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5', help='Path to HDF5 dataset')
     parser.add_argument('--api_base', type=str, default='http://localhost:10005/v1', help='vLLM API URL')
     parser.add_argument('--api_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Model path')
     parser.add_argument('--max_iterations', type=int, default=8000, help='Max iterations')
     parser.add_argument('--samples_per_prompt', type=int, default=4, help='Samples per prompt')
     parser.add_argument('--output_dir', type=str, default='./logs/pde_discovery_autogen_v04', help='Output directory')
+    parser.add_argument('--critic_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Vision model for Visual Critic (defaults to api_model)')
     args = parser.parse_args()
 
     # Load dataset
@@ -423,6 +880,7 @@ async def main_async():
     system = PDEDiscoveryAutogenV04(
         api_base=args.api_base,
         api_model=args.api_model,
+        critic_model=args.critic_model,
         max_iterations=args.max_iterations,
         samples_per_prompt=args.samples_per_prompt,
         output_dir=args.output_dir
@@ -435,10 +893,18 @@ async def main_async():
     print("COMPARISON")
     print("="*70)
     print(f"Ground Truth: {results['gt_equation']}")
-    print(f"Discovered:   {results['best_equation']}")
+    print(f"Discovered:   {results['numerical_best_equation']}")
     print(f"\nGT Parameters: {results['gt_parameters']}")
-    if system.buffer.get_best():
-        print(f"Fitted Params: {system.buffer.get_best().parameters}")
+    # Try to show fitted params for discovered best equation (by combined score)
+    fitted_params = None
+    for exp in system.buffer.experiences:
+        if exp.equation == results['numerical_best_equation']:
+            fitted_params = exp.parameters
+            break
+    if fitted_params is None and system.buffer.get_best():
+        fitted_params = system.buffer.get_best().parameters
+    if fitted_params is not None:
+        print(f"Fitted Params: {fitted_params}")
     print("="*70)
 
 

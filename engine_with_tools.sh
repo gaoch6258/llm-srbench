@@ -6,5 +6,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve /mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruc
   --port 10005 \
   --max-model-len 40730 \
   --tensor-parallel-size 4 \
-  --enable-auto-tool-choice \
-  --tool-call-parser hermes
+  --limit-mm-per-prompt.video 0 \
+  --async-scheduling
+    # --enable-auto-tool-choice \
+  # --tool-call-parser hermes \

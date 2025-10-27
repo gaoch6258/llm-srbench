@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code CLI 安装指南</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 50px 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 36px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 18px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .alert {
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            line-height: 1.6;
+        }
+
+        .alert-icon {
+            font-size: 32px;
+            flex-shrink: 0;
+        }
+
+        .alert-success {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            color: #2e7d32;
+        }
+
+        .alert-info {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            color: #1976d2;
+        }
+
+        .alert-warning {
+            background: #fff3e0;
+            border-left: 4px solid #ff9800;
+            color: #e65100;
+        }
+
+        .steps {
+            margin: 30px 0;
+        }
+
+        .step-section {
+            margin-bottom: 40px;
+        }
+
+        .step-section h2 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .step-section h3 {
+            color: #555;
+            font-size: 18px;
+            margin: 20px 0 15px 0;
+        }
+
+        .command-box {
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin: 15px 0;
+            position: relative;
+            overflow-x: auto;
+        }
+
+        .command-box code {
+            color: #00ff00;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s;
+        }
+
+        .copy-btn:hover {
+            background: #5568d3;
+        }
+
+        .checklist {
+            list-style: none;
+            margin: 20px 0;
+        }
+
+        .checklist li {
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .checklist li::before {
+            content: "✓";
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            background: #4caf50;
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 24px;
+            flex-shrink: 0;
+        }
+
+        .config-info {
+            background: #f5f7fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .config-info h3 {
+            margin: 0 0 15px 0;
+            font-size: 16px;
+        }
+
+        .config-item {
+            margin: 12px 0;
+        }
+
+        .config-item label {
+            display: block;
+            margin-bottom: 4px;
+            font-weight: 500;
+            color: #666;
+        }
+
+        .config-item code {
+            display: block;
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #333;
+            overflow-x: auto;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 14px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .contact-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(0, 0, 0, 0.5);
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .contact-modal.show {
+            display: flex;
+        }
+
+        .contact-modal-content {
+            position: relative;
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .contact-modal-close {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: #666;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: all 0.3s;
+        }
+
+        .contact-modal-close:hover {
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .contact-modal h2 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+        }
+
+        .contact-qr-container {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+
+        .contact-qr-image {
+            width: 200px;
+            height: 200px;
+            margin: 0 auto 15px;
+            background: white;
+            border-radius: 8px;
+            object-fit: contain;
+        }
+
+        .contact-qr-loading {
+            width: 200px;
+            height: 200px;
+            margin: 0 auto 15px;
+            background: white;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            color: #ccc;
+        }
+
+        .contact-info {
+            text-align: center;
+            color: #666;
+            line-height: 1.8;
+        }
+
+        .qr-grid {
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 30px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .qr-item {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border-radius: 12px;
+            flex: 0 1 auto;
+            max-width: 280px;
+        }
+
+        .contact-link {
+            display: inline-block;
+            margin-top: 15px;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            transition: all 0.3s;
+        }
+
+        .contact-link:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                padding: 40px 20px;
+            }
+
+            .header h1 {
+                font-size: 28px;
+            }
+
+            .content {
+                padding: 30px 20px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Claude Code CLI 安装指南</h1>
+            <p>快速、简单的一键安装流程</p>
+        </div>
+
+        <div class="content">
+            
+            <div class="alert alert-success">
+                <span class="alert-icon">✅</span>
+                <div>
+                    <strong>配置已包含</strong>
+                    <p style="margin-top: 8px;">您的 API 配置已包含在安装包中，安装完成后将自动配置。</p>
+                </div>
+            </div>
+            
+
+            <div class="alert alert-info">
+                <span class="alert-icon">💡</span>
+                <div>
+                    <strong>安装说明</strong>
+                    <p style="margin-top: 8px;">本安装包提供了一键安装脚本，自动完成所有安装步骤。请根据您的操作系统选择对应的脚本运行。</p>
+                </div>
+            </div>
+
+            <div class="steps">
+                <div class="step-section">
+                    <h2>🪟 Windows 用户</h2>
+
+                    <h3>✨ 方式一：一键自动安装（推荐）</h3>
+                    <p>右键点击以下文件，选择"以管理员身份运行"：</p>
+                    <div class="command-box">
+                        <button class="copy-btn" onclick="copyToClipboard('install-all.bat')">复制</button>
+                        <code>install-all.bat</code>
+                    </div>
+                    <p style="margin-top: 10px; font-size: 14px; color: #666;">
+                        或使用 PowerShell 版本：<code style="background: #f5f5f5; padding: 2px 6px; border-radius: 4px;">install-all.ps1</code>
+                    </p>
+
+                    <div class="alert alert-warning" style="margin-top: 15px;">
+                        <span class="alert-icon">⚠️</span>
+                        <div>
+                            <strong>重要：</strong>必须以管理员身份运行脚本，否则可能导致安装失败。
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">🔧 方式二：手动分步安装</h3>
+                    <p style="margin-bottom: 15px;">如果自动安装失败，可以手动执行以下步骤：</p>
+
+                    <div style="margin-left: 20px;">
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin-bottom: 10px;">📦 步骤 1: 安装依赖环境</h4>
+                            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">安装 Node.js、Git 等必要工具</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('scripts\\claude-dependencies-install.bat')">复制</button>
+                                <code>scripts\claude-dependencies-install.bat</code>
+                            </div>
+                            <p style="font-size: 13px; color: #999; margin-top: 5px;">
+                                右键选择"以管理员身份运行"
+                            </p>
+                        </div>
+
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin-bottom: 10px;">🚀 步骤 2: 安装 Claude Code CLI</h4>
+                            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">安装命令行工具本体</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('scripts\\install-claude-code.bat')">复制</button>
+                                <code>scripts\install-claude-code.bat</code>
+                            </div>
+                            <p style="font-size: 13px; color: #999; margin-top: 5px;">
+                                右键选择"以管理员身份运行"
+                            </p>
+                        </div>
+
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin-bottom: 10px;">⚙️ 步骤 3: 配置环境变量</h4>
+                            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">设置 API Key 和其他配置</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('scripts\\claude-env-setup.bat')">复制</button>
+                                <code>scripts\claude-env-setup.bat</code>
+                            </div>
+                            <p style="font-size: 13px; color: #999; margin-top: 5px;">
+                                右键选择"以管理员身份运行"
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info" style="margin-top: 20px;">
+                        <span class="alert-icon">💡</span>
+                        <div>
+                            <strong>提示：</strong>手动安装时，必须按顺序执行步骤 1 → 2 → 3。每个步骤完成后再执行下一步。
+                        </div>
+                    </div>
+                </div>
+
+                <div class="step-section">
+                    <h2>🍎 macOS / Linux 用户</h2>
+
+                    <h3>✨ 方式一：一键自动安装（推荐）</h3>
+                    <p>在终端中执行以下命令：</p>
+                    <div class="command-box">
+                        <button class="copy-btn" onclick="copyToClipboard('chmod +x install-all.sh && ./install-all.sh')">复制</button>
+                        <code>chmod +x install-all.sh && ./install-all.sh</code>
+                    </div>
+
+                    <p style="margin-top: 15px;">或者分步执行：</p>
+                    <div class="command-box">
+                        <button class="copy-btn" onclick="copyToClipboard('chmod +x install-all.sh')">复制</button>
+                        <code>chmod +x install-all.sh</code>
+                    </div>
+                    <div class="command-box">
+                        <button class="copy-btn" onclick="copyToClipboard('./install-all.sh')">复制</button>
+                        <code>./install-all.sh</code>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">🔧 方式二：手动分步安装</h3>
+                    <p style="margin-bottom: 15px;">如果自动安装失败，可以手动执行以下步骤：</p>
+
+                    <div style="margin-left: 20px;">
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin-bottom: 10px;">📦 步骤 1: 安装依赖环境</h4>
+                            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">安装 Node.js、Git 等必要工具</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('chmod +x scripts/claude-dependencies-install.sh && ./scripts/claude-dependencies-install.sh')">复制</button>
+                                <code>chmod +x scripts/claude-dependencies-install.sh && ./scripts/claude-dependencies-install.sh</code>
+                            </div>
+                        </div>
+
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin-bottom: 10px;">⚙️ 步骤 2: 配置环境变量</h4>
+                            <p style="font-size: 14px; color: #666; margin-bottom: 10px;">设置 API Key 和其他配置</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('chmod +x scripts/claude-env-setup.sh && ./scripts/claude-env-setup.sh')">复制</button>
+                                <code>chmod +x scripts/claude-env-setup.sh && ./scripts/claude-env-setup.sh</code>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info" style="margin-top: 20px;">
+                        <span class="alert-icon">💡</span>
+                        <div>
+                            <strong>提示：</strong>手动安装时，必须按顺序执行步骤 1 → 2。每个步骤完成后再执行下一步。
+                        </div>
+                    </div>
+                </div>
+
+                <div class="step-section">
+                    <h2>📋 安装完成后</h2>
+                    <ul class="checklist">
+                        <li>重启终端，让环境变量生效</li>
+                        <li>运行 <code>claude --version</code> 验证安装</li>
+                        <li>运行 <code>claude "Hello"</code> 测试连接</li>
+                        <li>配置文件已自动应用，无需手动配置</li>
+                    </ul>
+                </div>
+
+                <div class="step-section">
+                    <h2>🔄 升级 Claude Code CLI</h2>
+                    <p style="margin-bottom: 15px;">如果您已经安装了 Claude Code CLI，可以使用以下命令升级到最新版本：</p>
+
+                    <h3>更新命令</h3>
+                    <div class="command-box">
+                        <button class="copy-btn" onclick="copyToClipboard('claude update')">复制</button>
+                        <code>claude update</code>
+                    </div>
+
+                    <div class="alert alert-info" style="margin-top: 15px;">
+                        <span class="alert-icon">💡</span>
+                        <div>
+                            <strong>提示：</strong>升级过程会自动下载最新版本并替换现有文件，配置文件不会被覆盖。
+                        </div>
+                    </div>
+                </div>
+
+                <div class="step-section">
+                    <h2>🔌 VSCode 扩展配置</h2>
+                    <p style="margin-bottom: 15px;">如果您使用 VSCode 扩展，需要配置 <code>config.json</code> 文件来连接到您的 API 服务：</p>
+
+                    <div style="text-align: center; margin: 20px 0;">
+                        <img src="/qustion/api/vscode_login.png" alt="VSCode 登录界面" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    </div>
+
+                    <h3>配置步骤</h3>
+
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="margin-bottom: 10px;">📝 步骤 1: 创建配置文件</h4>
+                        <p style="font-size: 14px; color: #666; margin-bottom: 10px;">在解压的安装包目录中创建 <code>config.json</code> 文件，内容如下：</p>
+                        <div class="command-box">
+                            <button class="copy-btn" onclick="copyToClipboard('{\n  \"primaryApiKey\": \"visionCoder\"\n}')">复制</button>
+                            <code>{
+  "primaryApiKey": "visionCoder"
+}</code>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="margin-bottom: 10px;">📁 步骤 2: 移动配置文件到 Claude 配置目录</h4>
+
+                        <h5 style="margin: 15px 0 10px 0; color: #666; font-size: 15px;">使用命令行（推荐）</h5>
+
+                        <div style="margin: 15px 0;">
+                            <p style="font-weight: 500; margin-bottom: 8px;">🍎 macOS / Linux:</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('mkdir -p ~/.claude && mv config.json ~/.claude/')">复制</button>
+                                <code>mkdir -p ~/.claude && mv config.json ~/.claude/</code>
+                            </div>
+                        </div>
+
+                        <div style="margin: 15px 0;">
+                            <p style="font-weight: 500; margin-bottom: 8px;">🪟 Windows (PowerShell):</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('New-Item -ItemType Directory -Force -Path $env:USERPROFILE\\.claude; Move-Item -Path .\\config.json -Destination $env:USERPROFILE\\.claude\\ -Force')">复制</button>
+                                <code>New-Item -ItemType Directory -Force -Path $env:USERPROFILE\.claude
+Move-Item -Path .\config.json -Destination $env:USERPROFILE\.claude\ -Force</code>
+                            </div>
+                        </div>
+
+                        <div style="margin: 15px 0;">
+                            <p style="font-weight: 500; margin-bottom: 8px;">🪟 Windows (CMD):</p>
+                            <div class="command-box">
+                                <button class="copy-btn" onclick="copyToClipboard('if not exist \"%USERPROFILE%\\.claude\" mkdir \"%USERPROFILE%\\.claude\" && move config.json \"%USERPROFILE%\\.claude\\\"')">复制</button>
+                                <code>if not exist "%USERPROFILE%\.claude" mkdir "%USERPROFILE%\.claude"
+move config.json "%USERPROFILE%\.claude\"</code>
+                            </div>
+                        </div>
+
+                        <h5 style="margin: 25px 0 10px 0; color: #666; font-size: 15px;">手动操作（不使用命令行）</h5>
+
+                        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-top: 10px;">
+                            <div style="margin-bottom: 15px;">
+                                <p style="font-weight: 500; margin-bottom: 8px;">🪟 Windows 手动操作：</p>
+                                <ol style="margin: 8px 0 0 25px; line-height: 1.8;">
+                                    <li>按 <code style="background: white; padding: 2px 6px; border-radius: 4px;">Win + R</code> 打开运行对话框</li>
+                                    <li>输入 <code style="background: white; padding: 2px 6px; border-radius: 4px;">%USERPROFILE%</code> 并回车，打开用户目录</li>
+                                    <li>在用户目录下创建名为 <code style="background: white; padding: 2px 6px; border-radius: 4px;">.claude</code> 的文件夹（如果不存在）</li>
+                                    <li>将 <code style="background: white; padding: 2px 6px; border-radius: 4px;">config.json</code> 文件复制到 <code style="background: white; padding: 2px 6px; border-radius: 4px;">.claude</code> 文件夹中</li>
+                                </ol>
+                            </div>
+
+                            <div style="margin-bottom: 15px;">
+                                <p style="font-weight: 500; margin-bottom: 8px;">🍎 macOS 手动操作：</p>
+                                <ol style="margin: 8px 0 0 25px; line-height: 1.8;">
+                                    <li>打开 Finder</li>
+                                    <li>按 <code style="background: white; padding: 2px 6px; border-radius: 4px;">Cmd + Shift + G</code> 打开"前往文件夹"对话框</li>
+                                    <li>输入 <code style="background: white; padding: 2px 6px; border-radius: 4px;">~/.claude</code> 并回车（如果文件夹不存在，先输入 <code style="background: white; padding: 2px 6px; border-radius: 4px;">~</code> 回车，然后创建 <code style="background: white; padding: 2px 6px; border-radius: 4px;">.claude</code> 文件夹）</li>
+                                    <li>将 <code style="background: white; padding: 2px 6px; border-radius: 4px;">config.json</code> 文件拖拽到该文件夹中</li>
+                                </ol>
+                            </div>
+
+                            <div>
+                                <p style="font-weight: 500; margin-bottom: 8px;">🐧 Linux 手动操作：</p>
+                                <ol style="margin: 8px 0 0 25px; line-height: 1.8;">
+                                    <li>打开文件管理器</li>
+                                    <li>按 <code style="background: white; padding: 2px 6px; border-radius: 4px;">Ctrl + H</code> 显示隐藏文件</li>
+                                    <li>进入用户主目录（通常是 <code style="background: white; padding: 2px 6px; border-radius: 4px;">/home/你的用户名</code>）</li>
+                                    <li>创建 <code style="background: white; padding: 2px 6px; border-radius: 4px;">.claude</code> 文件夹（如果不存在）</li>
+                                    <li>将 <code style="background: white; padding: 2px 6px; border-radius: 4px;">config.json</code> 文件复制到 <code style="background: white; padding: 2px 6px; border-radius: 4px;">.claude</code> 文件夹中</li>
+                                </ol>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="margin-bottom: 10px;">✅ 步骤 3: 验证配置</h4>
+                        <p style="font-size: 14px; color: #666; margin-bottom: 10px;">重启 VSCode，扩展将自动读取配置文件并连接到您的 API 服务。</p>
+                    </div>
+
+                    <div class="alert alert-warning">
+                        <span class="alert-icon">⚠️</span>
+                        <div>
+                            <strong>注意：</strong>
+                            <ul style="margin: 10px 0 0 20px; line-height: 1.8;">
+                                <li>配置文件内容固定为上述格式，无需修改</li>
+                                <li>配置文件路径：
+                                    <ul style="margin: 5px 0 0 20px;">
+                                        <li>macOS/Linux: <code>~/.claude/config.json</code></li>
+                                        <li>Windows: <code>%USERPROFILE%\.claude\config.json</code></li>
+                                    </ul>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                
+                <div class="step-section">
+                    <h2>⚙️ 当前配置</h2>
+                    <div class="config-info">
+                        <h3>以下配置将自动应用：</h3>
+                        <div class="config-item">
+                            <label>API Key:</label>
+                            <code>sk-MKGtNl8Vm...</code>
+                        </div>
+                        <div class="config-item">
+                            <label>API Base URL:</label>
+                            <code>https://coder.api.visioncoder.cn</code>
+                        </div>
+                    </div>
+                </div>
+                
+
+                
+                <div class="step-section">
+                    <h2>📚 需要帮助？</h2>
+                    <div class="button-group">
+                        <a href="https://coder.visioncoder.cn/docx" target="_blank" class="btn btn-primary">查看完整文档</a>
+                        <a href="https://coder.visioncoder.cn/start" target="_blank" class="btn btn-secondary">常见问题 FAQ</a>
+                        <button onclick="showContactModal()" class="btn btn-secondary">联系我们</button>
+                    </div>
+                </div>
+                
+            </div>
+        </div>
+    </div>
+
+    <!-- 联系我们弹窗 -->
+    <div class="contact-modal" id="contactModal">
+        <div class="contact-modal-content">
+            <button class="contact-modal-close" onclick="closeContactModal()">×</button>
+            <h2>💬 联系我们</h2>
+            <div class="contact-qr-container">
+                
+                <div style="text-align: center; padding: 40px 20px;">
+                    <div style="font-size: 64px; margin-bottom: 20px;">📱</div>
+                    <h3 style="margin: 0 0 10px 0; color: #333;">扫码联系客服</h3>
+                    <p style="font-size: 14px; color: #666; margin: 0;">获取一对一技术支持</p>
+                    <p style="font-size: 13px; color: #999; margin-top: 15px;">访问 <a href="https://coder.visioncoder.cn" target="_blank" style="color: #667eea;">官网</a> 获取联系方式</p>
+                </div>
+                
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                // 找到被点击的按钮
+                const buttons = document.querySelectorAll('.copy-btn');
+                buttons.forEach(btn => {
+                    if (btn.onclick && btn.onclick.toString().includes(text)) {
+                        const originalText = btn.textContent;
+                        btn.textContent = '已复制!';
+                        btn.style.background = '#4caf50';
+                        setTimeout(() => {
+                            btn.textContent = originalText;
+                            btn.style.background = '#667eea';
+                        }, 2000);
+                    }
+                });
+            }).catch(err => {
+                console.error('复制失败:', err);
+                alert('复制失败，请手动复制');
+            });
+        }
+
+        function showContactModal() {
+            document.getElementById('contactModal').classList.add('show');
+        }
+
+        function closeContactModal() {
+            document.getElementById('contactModal').classList.remove('show');
+        }
+
+        // 点击弹窗外部关闭
+        document.getElementById('contactModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeContactModal();
+            }
+        });
+    </script>
+</body>
+</html>

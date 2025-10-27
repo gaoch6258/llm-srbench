@@ -1,0 +1,13 @@
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-MKGtNl8VmKb8FiatG3f6bCTuXdpT6Jkz72Cc79C7686a4a4fA861Ba38C43f2863",
+    "ANTHROPIC_BASE_URL": "https://coder.api.visioncoder.cn",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+    "CLAUDE_MODEL": "claude-opus-4-20250514"
+  },
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "apiKeyHelper": "echo 'sk-MKGtNl8VmKb8FiatG3f6bCTuXdpT6Jkz72Cc79C7686a4a4fA861Ba38C43f2863'"
+}

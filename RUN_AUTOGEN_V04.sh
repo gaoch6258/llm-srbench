@@ -64,6 +64,7 @@ echo ""
   --dataset logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5 \
   --api_base http://localhost:10005/v1 \
   --api_model /mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct \
+  --critic_model /mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct \
   --max_iterations 8000 \
   --samples_per_prompt 4 \
   --output_dir logs/pde_discovery_autogen_v04_8k

@@ -1,0 +1,157 @@
+================================================================================
+                    PDE DISCOVERY MULTIAGENT PIPELINE
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              DATA INPUT                                     │
+│  • g_observed: Density field observations (H × W × T)                       │
+│  • S: Signal/chemoattractant field (H × W)                                  │
+│  • Initial conditions: g_init                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ITERATION LOOP (1 to N)                             │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │              PHASE 1: PDE GENERATOR AGENT                           │   │
+│  │                                                                     │   │
+│  │  Input:                                                             │   │
+│  │    • Data summary (shape, mass, statistics)                        │   │
+│  │    • Top-3 previous experiences (with visual feedback)             │   │
+│  │    • Critic feedback from last iteration                           │   │
+│  │                                                                     │   │
+│  │  Action:                                                            │   │
+│  │    For i in 1..samples_per_prompt (e.g., 4):                       │   │
+│  │      1. Generate complete pde_update() function code               │   │
+│  │         using scipy.ndimage operators:                              │   │
+│  │         • scipy.ndimage.laplace(g) / dx**2                          │   │
+│  │         • scipy.ndimage.sobel(g, axis=1) / (2*dx)                   │   │
+│  │                                                                     │   │
+│  │      2. Call evaluate_pde_tool(pde_code=..., num_params=N)         │   │
+│  │                                                                     │   │
+│  │         ┌───────────────────────────────────────────────┐          │   │
+│  │         │       EVALUATION SUBPROCESS                   │          │   │
+│  │         │                                               │          │   │
+│  │         │  1. Execute generated PDE code in isolation   │          │   │
+│  │         │  2. Fit parameters using scipy.optimize       │          │   │
+│  │         │  3. Simulate PDE for T timesteps              │          │   │
+│  │         │  4. Compute metrics:                          │          │   │
+│  │         │     • R² score                                │          │   │
+│  │         │     • MSE                                     │          │   │
+│  │         │     • Mass conservation error                 │          │   │
+│  │         │  5. Create visualization plot:                │          │   │
+│  │         │     [Obs t=0] [Pred t=0]                      │          │   │
+│  │         │     [Obs t=T/2] [Pred t=T/2]                  │          │   │
+│  │         │     [Obs t=T] [Pred t=T]                      │          │   │
+│  │         │  6. Return results + plot path                │          │   │
+│  │         └───────────────────────────────────────────────┘          │   │
+│  │                                                                     │   │
+│  │  Output:                                                            │   │
+│  │    • 4 evaluated PDEs with fitted parameters                       │   │
+│  │    • 4 visualization plots                                         │   │
+│  │    • Metrics for each candidate                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │              PHASE 2: VISUAL CRITIC AGENT                           │   │
+│  │                                                                     │   │
+│  │  Input:                                                             │   │
+│  │    • Latest evaluation results (4 PDEs)                            │   │
+│  │    • Visualization images (base64 encoded)                         │   │
+│  │    • Code snippets for each PDE                                    │   │
+│  │    • Metrics: R², MSE, Mass Error                                  │   │
+│  │                                                                     │   │
+│  │  Analysis (using vision model):                                     │   │
+│  │    For each PDE:                                                    │   │
+│  │      • Spatial pattern accuracy (do patterns match?)               │   │
+│  │      • Temporal evolution (correct dynamics?)                      │   │
+│  │      • Boundary behavior (edges handled properly?)                 │   │
+│  │      • Mass conservation (physical plausibility?)                  │   │
+│  │                                                                     │   │
+│  │  Output:                                                            │   │
+│  │    • Ranking of candidates (best to worst)                         │   │
+│  │    • Specific observations:                                        │   │
+│  │      "PDE #2 has best spatial patterns"                            │   │
+│  │      "PDE #3 shows excessive diffusion"                            │   │
+│  │    • Actionable suggestions:                                       │   │
+│  │      "Try reducing diffusion coefficient"                          │   │
+│  │      "Add reaction term to capture growth"                         │   │
+│  │      "Increase chemotaxis strength"                                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                   EXPERIENCE BUFFER UPDATE                          │   │
+│  │                                                                     │   │
+│  │  Store for each evaluated PDE:                                      │   │
+│  │    • Code snippet                                                   │   │
+│  │    • Fitted parameters                                             │   │
+│  │    • Numerical score (from metrics)                                │   │
+│  │    • Visual score (from critic)                                    │   │
+│  │    • Combined score (weighted average)                             │   │
+│  │    • Visual analysis text                                          │   │
+│  │    • Critic suggestions                                            │   │
+│  │    • Visualization path                                            │   │
+│  │                                                                     │   │
+│  │  Update best score if improved                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    CONVERGENCE CHECK                                │   │
+│  │                                                                     │   │
+│  │  Check if:                                                          │   │
+│  │    • Combined score >= convergence_threshold (e.g., 9.8/10)        │   │
+│  │    OR                                                               │   │
+│  │    • No improvement for plateau_patience iterations (e.g., 100)    │   │
+│  │                                                                     │   │
+│  │  If converged: EXIT loop                                            │   │
+│  │  Else: Continue to next iteration                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             FINAL RESULTS                                   │
+│                                                                             │
+│  • Best discovered PDE (code + parameters)                                  │
+│  • Best combined score                                                      │
+│  • Total iterations                                                         │
+│  • Experience buffer statistics                                             │
+│  • TensorBoard logs for visualization                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                           KEY FEATURES
+================================================================================
+
+1. SCIPY INTEGRATION:
+   ✓ All spatial operators use scipy.ndimage (Laplacian, gradients)
+   ✓ Automatic boundary handling
+   ✓ Numerically stable implementations
+
+2. MULTIAGENT COLLABORATION:
+   ✓ Generator: Proposes diverse PDE hypotheses as complete code
+   ✓ Critic: Analyzes visualizations using vision model
+   ✓ Iterative refinement based on visual feedback
+
+3. EXPERIENCE BUFFER:
+   ✓ Stores top-K experiences with visual analysis
+   ✓ In-context learning from previous attempts
+   ✓ Tracks both numerical and visual scores
+
+4. SCORING SYSTEM:
+   ✓ Numerical score: Based on R², MSE, mass conservation
+   ✓ Visual score: From critic's analysis (0-10)
+   ✓ Combined score: Weighted average (default 70% num, 30% visual)
+
+5. VISUALIZATION:
+   ✓ Automatic plot generation for each evaluation
+   ✓ Side-by-side comparison (observed vs predicted)
+   ✓ Multiple timesteps shown
+   ✓ Fed to vision-enabled critic for analysis
+
+================================================================================

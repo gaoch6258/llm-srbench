@@ -19,13 +19,19 @@ class PDEExperience:
     """Single experience entry for PDE discovery"""
     equation: str
     score: float
-    metrics: Dict[str, float]  # mse, r2, nmse, etc.
+    metrics: Dict[str, float]  # mse, r2, nmse, etc. (may also include 'visual_score', 'combined_score')
     visual_analysis: str  # Analysis from Visual Critic
     reasoning: str  # Reasoning from Generator
     suggestions: str  # Improvement suggestions from Critic
     parameters: Dict[str, float]  # Fitted parameters
     timestamp: str
     iteration: int
+    # Optional, newly added fields (backward compatible)
+    visual_score: Optional[float] = None
+    combined_score: Optional[float] = None
+    visualization_path: Optional[str] = None
+    spatial_assessment: Optional[str] = ""
+    temporal_assessment: Optional[str] = ""
 
     def to_dict(self) -> Dict:
         """Convert to dictionary"""
@@ -33,8 +39,23 @@ class PDEExperience:
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'PDEExperience':
-        """Create from dictionary"""
-        return cls(**data)
+        """Create from dictionary with backward-compatible defaults"""
+        return cls(
+            equation=data.get('equation', ''),
+            score=data.get('score', 0.0),
+            metrics=data.get('metrics', {}),
+            visual_analysis=data.get('visual_analysis', ''),
+            reasoning=data.get('reasoning', ''),
+            suggestions=data.get('suggestions', ''),
+            parameters=data.get('parameters', {}),
+            timestamp=data.get('timestamp', ''),
+            iteration=int(data.get('iteration', 0)),
+            visual_score=data.get('visual_score'),
+            combined_score=data.get('combined_score'),
+            visualization_path=data.get('visualization_path'),
+            spatial_assessment=data.get('spatial_assessment', ''),
+            temporal_assessment=data.get('temporal_assessment', ''),
+        )
 
     def to_prompt_context(self, include_visual: bool = False) -> str:
         """
@@ -53,17 +74,36 @@ class PDEExperience:
         mse_str = f"{self.metrics['mse']:.6f}" if 'mse' in self.metrics else 'N/A'
         r2_str = f"{self.metrics['r2']:.4f}" if 'r2' in self.metrics else 'N/A'
         nmse_str = f"{self.metrics['nmse']:.4f}" if 'nmse' in self.metrics else 'N/A'
+        vis_score_str = (
+            f"{self.metrics['visual_score']:.2f}" if 'visual_score' in self.metrics and self.metrics['visual_score'] is not None else (
+                f"{self.visual_score:.2f}" if self.visual_score is not None else 'N/A'
+            )
+        )
+        combined_str = (
+            f"{self.metrics['combined_score']:.2f}" if 'combined_score' in self.metrics and self.metrics['combined_score'] is not None else (
+                f"{self.combined_score:.2f}" if self.combined_score is not None else 'N/A'
+            )
+        )
 
         context = f"""
 Previous Attempt #{self.iteration}:
 Equation: {self.equation}
-Score: {self.score:.4f}
-Metrics: MSE={mse_str}, R²={r2_str}, NMSE={nmse_str}
+Numerical Score: {self.score:.4f} (0-10)
+Metrics: MSE={mse_str}, R²={r2_str}, NMSE={nmse_str}, VisualScore={vis_score_str}, Combined={combined_str}
 Parameters: {params_str}
 Reasoning: {self.reasoning}
 """
-        if include_visual and self.visual_analysis:
-            context += f"Visual Critic Analysis: {self.visual_analysis}\n"
+        if include_visual and (self.visual_analysis or self.spatial_assessment or self.temporal_assessment):
+            context += "Visual Critic Analysis: "
+            if self.visual_analysis:
+                context += f"{self.visual_analysis}\n"
+            else:
+                parts = []
+                if self.spatial_assessment:
+                    parts.append(f"Spatial: {self.spatial_assessment}")
+                if self.temporal_assessment:
+                    parts.append(f"Temporal: {self.temporal_assessment}")
+                context += (" | ".join(parts) + "\n") if parts else "\n"
 
         if self.suggestions:
             context += f"Suggestions: {self.suggestions}\n"
@@ -97,7 +137,11 @@ class PDEExperienceBuffer:
 
     def add(self, equation: str, score: float, metrics: Dict[str, float],
             visual_analysis: str = "", reasoning: str = "",
-            suggestions: str = "", parameters: Dict[str, float] = None) -> None:
+            suggestions: str = "", parameters: Dict[str, float] = None,
+            visual_score: Optional[float] = None,
+            combined_score: Optional[float] = None,
+            visualization_path: Optional[str] = None,
+            spatial_assessment: str = "", temporal_assessment: str = "") -> None:
         """
         Add new experience to buffer
 
@@ -121,7 +165,12 @@ class PDEExperienceBuffer:
             suggestions=suggestions,
             parameters=parameters or {},
             timestamp=datetime.now().isoformat(),
-            iteration=self.iteration_counter
+            iteration=self.iteration_counter,
+            visual_score=visual_score,
+            combined_score=combined_score,
+            visualization_path=visualization_path,
+            spatial_assessment=spatial_assessment,
+            temporal_assessment=temporal_assessment,
         )
 
         self.experiences.append(experience)
