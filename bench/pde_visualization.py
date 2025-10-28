@@ -406,3 +406,101 @@ class PDEVisualizer:
         plt.close(fig)
 
         return img
+
+    def create_rollout_grid_with_stats(
+        self,
+        observed: np.ndarray,
+        predicted: np.ndarray,
+        times: Optional[List[int]] = None,
+        save_path: Optional[str] = None,
+    ) -> Image.Image:
+        """
+        Create a 9-panel figure with 6 rollout visualizations and 3 statistical plots.
+
+        - Panels 1-6: Obs (left) vs Pred (right) for six timepoints
+        - Panel 7: MSE over time
+        - Panel 8: Total mass over time (Obs vs Pred)
+        - Panel 9: Spatial mean over time (Obs vs Pred)
+
+        Args:
+            observed: (H, W, T)
+            predicted: (H, W, T)
+            times: list of 6 time indices to visualize; if None, uses 6 evenly spaced
+            save_path: optional output path
+        Returns:
+            PIL Image of the figure
+        """
+        H, W, T = observed.shape
+        assert predicted.shape == observed.shape, "Observed and predicted must share shape"
+
+        if times is None:
+            # Evenly spaced including first and last; ensure 6 unique indices
+            times = np.linspace(0, T-1, 6, dtype=int).tolist()
+            # Guarantee uniqueness and sorted
+            times = sorted(list(dict.fromkeys(times)))
+            # If fewer than 6 due to very small T, pad with last
+            while len(times) < 6:
+                times.append(T-1)
+
+        fig = plt.figure(figsize=(16, 12), dpi=self.dpi)
+        gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+
+        # Panels 1-6: rollout frames (Obs vs Pred combined horizontally)
+        vmin = np.min(observed)
+        vmax = np.max(observed)
+        for i, t in enumerate(times[:6]):
+            row, col = divmod(i, 3)
+            ax = fig.add_subplot(gs[row, col])
+            t = int(np.clip(t, 0, T-1))
+            combined = np.hstack([observed[:, :, t], predicted[:, :, t]])
+            im = ax.imshow(combined, cmap='viridis', aspect='auto', vmin=vmin, vmax=vmax)
+            ax.set_title(f'Rollout t={t} | Obs (L) vs Pred (R)')
+            ax.axis('off')
+            # Separator line between Obs and Pred halves
+            ax.axvline(x=W-0.5, color='white', linewidth=2, linestyle='--')
+            plt.colorbar(im, ax=ax, fraction=0.046)
+
+        # Panel 7: MSE over time
+        ax7 = fig.add_subplot(gs[2, 0])
+        mse_over_time = np.mean((predicted - observed) ** 2, axis=(0, 1))
+        ax7.plot(mse_over_time, 'k-', linewidth=2, label='MSE')
+        ax7.fill_between(np.arange(T), 0, mse_over_time, alpha=0.25, color='red')
+        ax7.set_title('MSE Over Time')
+        ax7.set_xlabel('Time')
+        ax7.set_ylabel('MSE')
+        ax7.grid(True, alpha=0.3)
+        ax7.set_yscale('log')
+
+        # Panel 8: Total mass over time
+        ax8 = fig.add_subplot(gs[2, 1])
+        obs_mass = np.sum(observed, axis=(0, 1))
+        pred_mass = np.sum(predicted, axis=(0, 1))
+        ax8.plot(obs_mass, 'b-', linewidth=2, label='Observed')
+        ax8.plot(pred_mass, 'r--', linewidth=2, label='Predicted')
+        ax8.set_title('Total Mass Over Time')
+        ax8.set_xlabel('Time')
+        ax8.set_ylabel('Σ g')
+        ax8.legend()
+        ax8.grid(True, alpha=0.3)
+
+        # Panel 9: Spatial mean over time
+        ax9 = fig.add_subplot(gs[2, 2])
+        obs_mean = np.mean(observed, axis=(0, 1))
+        pred_mean = np.mean(predicted, axis=(0, 1))
+        ax9.plot(obs_mean, 'b-', linewidth=2, label='Observed')
+        ax9.plot(pred_mean, 'r--', linewidth=2, label='Predicted')
+        ax9.set_title('Spatial Mean Over Time')
+        ax9.set_xlabel('Time')
+        ax9.set_ylabel('Mean g')
+        ax9.legend()
+        ax9.grid(True, alpha=0.3)
+
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', dpi=self.dpi)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=self.dpi)
+        buf.seek(0)
+        img = Image.open(buf)
+        plt.close(fig)
+        return img

@@ -36,6 +36,7 @@ from autogen_core.models import ModelFamily
 
 
 from bench.pde_datamodule import ChemotaxisDataModule
+from bench.pde_datamodule import ChemotaxisProblem
 from bench.pde_solver import PDESolver, PDEConfig
 from bench.pde_visualization import PDEVisualizer
 from bench.pde_experience_buffer import PDEExperienceBuffer
@@ -109,7 +110,7 @@ EXAMPLES OF POSSIBLE PDE FORMS:
 - With advection: ∂g/∂t = D·Δg - v·∇g
 - With chemotaxis: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
 - Nonlinear: ∂g/∂t = D·Δg + r·g·(1-g)
-- Complex: ∂g/∂t = D·Δg - χ·∇·(g·∇S) + r·g·(1-g/K)
+- Complex: ∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)
 
 NUMBER OF PARAMETERS:
 - You decide how many parameters your PDE needs
@@ -308,7 +309,7 @@ class PDEDiscoveryAutogenV04:
             problem = self.current_problem
 
             # Parameter bounds - generic for any number of params
-            param_bounds = [(0.001, 5.0) for _ in range(num_params)]
+            param_bounds = [(1e-6, 1e2) for _ in range(num_params)]
 
             # Directly use the provided code (agent generates it)
             # No intermediate LLM call - agent IS the LLM!
@@ -337,7 +338,7 @@ class PDEDiscoveryAutogenV04:
 
             # Initial guess: midpoint of bounds
             x0 = [(b[0] + b[1]) / 2 for b in param_bounds]
-            result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=param_bounds)
+            result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=param_bounds, )
             fitted_params_list = result.x
             loss = result.fun
             steps_roll = min(g_series.shape[2], self.eval_max_steps)
@@ -858,7 +859,16 @@ First round - PDE_Generator, please explore diverse PDE hypotheses:
 
 async def main_async():
     parser = argparse.ArgumentParser(description="PDE Discovery - AutoGen v0.4")
-    parser.add_argument('--dataset', type=str, default='logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5', help='Path to HDF5 dataset')
+    parser.add_argument('--dataset', type=str, default='logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5', help='Path to dataset (HDF5) or folder with npy pair')
+    parser.add_argument('--ca_path', type=str, default=None, help='Path to npy: chemoattractant (S); expects shape (T,H,W)')
+    parser.add_argument('--cell_path', type=str, default=None, help='Path to npy: cell density video (g); expects shape (T,H,W)')
+    parser.add_argument('--from_npy', action='store_true', help='Load from npy files instead of HDF5')
+    parser.add_argument('--fit_fixed', action='store_true', help='Bypass LLM; fit fixed PDE ∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)')
+    parser.add_argument('--dt', type=float, default=1.0, help='Time step for npy data (default: 1.0)')
+    parser.add_argument('--dx', type=float, default=1.0, help='Pixel size x (default: 1.0)')
+    parser.add_argument('--dy', type=float, default=1.0, help='Pixel size y (default: 1.0)')
+    parser.add_argument('--n_restarts', type=int, default=8, help='Number of random restarts for fixed PDE fitting')
+    parser.add_argument('--max_iter_fit', type=int, default=200, help='Max iterations for optimizer in fixed PDE fitting')
     parser.add_argument('--api_base', type=str, default='http://localhost:10005/v1', help='vLLM API URL')
     parser.add_argument('--api_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Model path')
     parser.add_argument('--max_iterations', type=int, default=8000, help='Max iterations')
@@ -867,16 +877,212 @@ async def main_async():
     parser.add_argument('--critic_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Vision model for Visual Critic (defaults to api_model)')
     args = parser.parse_args()
 
+    # Helper: loader for npy pair
+    def _load_npy_pair(ca_path: Optional[str], cell_path: Optional[str]) -> ChemotaxisProblem:
+        # If folder is given in --dataset, assume default filenames
+        if (ca_path is None or cell_path is None) and args.dataset and Path(args.dataset).is_dir():
+            folder = Path(args.dataset)
+            ca_default = folder / 'ca_video_continuous.npy'
+            cell_default = folder / 'cell_video_continuous.npy'
+            if ca_path is None:
+                ca_path = str(ca_default)
+            if cell_path is None:
+                cell_path = str(cell_default)
+
+        if ca_path is None or cell_path is None:
+            raise ValueError('Both --ca_path and --cell_path must be provided (or set --dataset to folder containing the default npy filenames).')
+
+        print(f"Loading npy pair: S={ca_path}, g={cell_path}")
+        S_np = np.load(ca_path)
+        g_np = np.load(cell_path)
+        if S_np.ndim != 3 or g_np.ndim != 3:
+            raise ValueError(f"Expected (T,H,W) arrays; got S{S_np.shape}, g{g_np.shape}")
+
+        # Convert (T,H,W) -> (H,W,T)
+        S = np.transpose(S_np, (1, 2, 0)).astype(np.float32)
+        g_series = np.transpose(g_np, (1, 2, 0)).astype(np.float32)
+
+        # Standardize by std only (per user request)
+        S_std = float(S.std())
+        g_std = float(g_series.std())
+        S = S / max(S_std, 1e-8)
+        g_series = g_series / max(g_std, 1e-8)
+
+        # Numerical safety for ln(S)
+        S = np.maximum(S, 1e-6)
+
+        metadata = {
+            'dx': float(args.dx), 'dy': float(args.dy), 'dt': float(args.dt),
+            'source': 'npy_pair',
+            'reference_pde': '∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)'
+        }
+        problem = ChemotaxisProblem(
+            g_init=g_series[:, :, 0].copy(),
+            S=S,
+            g_observed=g_series,
+            metadata=metadata,
+            gt_equation=metadata['reference_pde']
+        )
+        return problem
+
     # Load dataset
-    print(f"Loading dataset: {args.dataset}")
-    dm = ChemotaxisDataModule(data_source="hdf5", data_path=args.dataset)
-    problems = dm.load()
-    problem = list(problems.values())[0]
+    if args.from_npy or args.ca_path or args.cell_path or (args.dataset and Path(args.dataset).is_dir()):
+        problem = _load_npy_pair(args.ca_path, args.cell_path)
+        print(f"✓ Loaded (npy): {problem.g_observed.shape}")
+    else:
+        print(f"Loading dataset: {args.dataset}")
+        dm = ChemotaxisDataModule(data_source="hdf5", data_path=args.dataset)
+        problems = dm.load()
+        problem = list(problems.values())[0]
+        print(f"✓ Loaded (hdf5): {problem.g_observed.shape}")
+    print(f"  Ground Truth / Reference: {problem.gt_equation}")
 
-    print(f"✓ Loaded: {problem.g_observed.shape}")
-    print(f"  Ground Truth: {problem.gt_equation}")
+    # If requested, run a fixed-PDE fitting using the provided reference form
+    if args.fit_fixed:
+        # Fit parameters on dg/dt objective with rollout validation
+        print("Running fixed-PDE fitting (D, chi, r, K)...")
 
-    # Run discovery
+        H, W, T = problem.g_observed.shape
+        dx = float(problem.metadata.get('dx', args.dx))
+        dy = float(problem.metadata.get('dy', args.dy))
+        dt = float(problem.metadata.get('dt', args.dt))
+
+        g_series = problem.g_observed.astype(np.float32)
+        S_series = problem.S.astype(np.float32)
+
+        # Precompute observed dg/dt
+        dgdt_obs = (g_series[:, :, 1:] - g_series[:, :, :-1]) / dt
+
+        # Utility: vectorized spatial ops on (H,W,T-1)
+        def grad_x(a):
+            import scipy.ndimage as nd
+            return nd.sobel(a, axis=1) / (2.0 * dx)
+
+        def grad_y(a):
+            import scipy.ndimage as nd
+            return nd.sobel(a, axis=0) / (2.0 * dy)
+
+        def laplacian_xy(a):
+            # Second derivatives only along x and y, vectorized over time dim
+            d2x = np.gradient(np.gradient(a, dx, axis=1), dx, axis=1)
+            d2y = np.gradient(np.gradient(a, dy, axis=0), dy, axis=0)
+            return d2x + d2y
+
+        # Predicted dg/dt for all t using current state g_t and S_t (T-1 slices)
+        def predict_dgdt(params):
+            D, chi, r, K = params
+            g_t = g_series[:, :, :-1]
+            S_t = S_series[:, :, :-1] if S_series.ndim == 3 else S_series
+            # Ensure broadcast if S is 2D
+            if S_series.ndim == 2:
+                S_t = np.repeat(S_series[:, :, None], g_t.shape[2], axis=2)
+            S_t = np.maximum(S_t, 1e-6)
+
+            lap_g = laplacian_xy(g_t)
+            lnS = np.log(S_t)
+            grad_lnS_x = grad_x(lnS)
+            grad_lnS_y = grad_y(lnS)
+            flux_x = g_t * grad_lnS_x
+            flux_y = g_t * grad_lnS_y
+            div_flux = grad_x(flux_x) + grad_y(flux_y)
+            reaction = r * g_t * (1.0 - g_t / (K + 1e-8))
+            return D * lap_g - chi * div_flux + reaction
+
+        # Objective: MSE between predicted and observed dg/dt
+        def objective(params):
+            D, chi, r, K = params
+            # Enforce positivity for D, chi, K; r allowed >= 0
+            if D < 0 or chi < 0 or K <= 0 or r < 0:
+                return 1e12
+            pred = predict_dgdt(params)
+            return float(np.mean((pred - dgdt_obs) ** 2))
+
+        # Parameter bounds (coarse): D in [0, 5], chi in [0, 50], r in [0, 2], K in [0.25*max, 4*max]
+        g_max = float(np.max(g_series))
+        bounds = [(1e-6, 5.0), (0.0, 50.0), (0.0, 2.0), (max(1e-3, 0.25 * g_max), max(1.0, 4.0 * g_max))]
+
+        # Multi-start optimization to estimate parameter ranges
+        from scipy.optimize import minimize
+        rng = np.random.default_rng(42)
+        best_res = None
+        trials = []
+        for i in range(int(args.n_restarts)):
+            x0 = np.array([
+                rng.uniform(*bounds[0]),
+                rng.uniform(*bounds[1]),
+                rng.uniform(*bounds[2]),
+                rng.uniform(*bounds[3]),
+            ], dtype=np.float64)
+            res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={"maxiter": int(args.max_iter_fit)})
+            trials.append(res.x.tolist() + [res.fun])
+            if best_res is None or res.fun < best_res.fun:
+                best_res = res
+            print(f"  Restart {i+1}/{args.n_restarts}: loss={res.fun:.6e}, params=[D={res.x[0]:.4g}, chi={res.x[1]:.4g}, r={res.x[2]:.4g}, K={res.x[3]:.4g}]")
+
+        trials = np.array(trials)
+        D_list, chi_list, r_list, K_list, loss_list = trials.T
+        summary = {
+            'D': {'min': float(D_list.min()), 'max': float(D_list.max()), 'mean': float(D_list.mean()), 'median': float(np.median(D_list))},
+            'chi': {'min': float(chi_list.min()), 'max': float(chi_list.max()), 'mean': float(chi_list.mean()), 'median': float(np.median(chi_list))},
+            'r': {'min': float(r_list.min()), 'max': float(r_list.max()), 'mean': float(r_list.mean()), 'median': float(np.median(r_list))},
+            'K': {'min': float(K_list.min()), 'max': float(K_list.max()), 'mean': float(K_list.mean()), 'median': float(np.median(K_list))},
+            'best_loss': float(best_res.fun),
+        }
+
+        print("\nEstimated parameter ranges (across restarts):")
+        for k, v in summary.items():
+            if k == 'best_loss':
+                continue
+            print(f"  {k}: min={v['min']:.4g}, max={v['max']:.4g}, mean={v['mean']:.4g}, median={v['median']:.4g}")
+        print(f"  best_loss (MSE_dgdt): {summary['best_loss']:.6e}")
+
+        # Rollout using best params
+        best_params = best_res.x
+
+        def one_step(g2d, S2d, params):
+            D, chi, r, K = params
+            # 2D ops
+            import scipy.ndimage as nd
+            lap = nd.laplace(g2d) / (dx * dx)
+            lnS = np.log(np.maximum(S2d, 1e-6))
+            gx = nd.sobel(lnS, axis=1) / (2.0 * dx)
+            gy = nd.sobel(lnS, axis=0) / (2.0 * dy)
+            div = (nd.sobel(g2d * gx, axis=1) / (2.0 * dx)) + (nd.sobel(g2d * gy, axis=0) / (2.0 * dy))
+            react = r * g2d * (1.0 - g2d / (K + 1e-8))
+            dgdt = D * lap - chi * div + react
+            return np.maximum(g2d + dt * dgdt, 0.0)
+
+        Tn = g_series.shape[2]
+        g_roll = np.zeros_like(g_series)
+        g_roll[:, :, 0] = g_series[:, :, 0]
+        for t in range(1, Tn):
+            S_t = S_series[:, :, t] if S_series.ndim == 3 else S_series
+            g_roll[:, :, t] = one_step(g_roll[:, :, t-1], S_t, best_params)
+
+        # Save 9-panel visualization
+        out_dir = Path(args.output_dir) / 'npy_fit'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        viz_path = out_dir / 'rollout_6x3.png'
+        PDEVisualizer().create_rollout_grid_with_stats(
+            observed=g_series, predicted=g_roll, save_path=str(viz_path)
+        )
+        print(f"Saved rollout and stats visualization to: {viz_path}")
+
+        # Save parameter summary
+        with open(out_dir / 'fit_summary.json', 'w') as f:
+            json.dump({
+                'best_params': {'D': float(best_params[0]), 'chi': float(best_params[1]), 'r': float(best_params[2]), 'K': float(best_params[3])},
+                'ranges': summary,
+            }, f, indent=2)
+        print(f"Saved parameter summary to: {out_dir / 'fit_summary.json'}")
+
+        return { 'best_params': best_params.tolist(), 'ranges': summary }
+
+    # Run discovery (LLM-driven) if not fixed fitting
+    if args.fit_fixed:
+        # In fixed-fit mode, we already returned above after completion
+        return
+
     system = PDEDiscoveryAutogenV04(
         api_base=args.api_base,
         api_model=args.api_model,
