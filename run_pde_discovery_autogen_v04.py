@@ -18,6 +18,7 @@ from typing import Annotated, Optional, Dict, Any
 import numpy as np
 import asyncio
 import base64
+import scipy
 import urllib.request
 from PIL import Image as PILImage
 # TensorBoard
@@ -33,9 +34,9 @@ from autogen_agentchat.messages import TextMessage
 from autogen_core import CancellationToken
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core.models import ModelFamily
+from tifffile import tifffile
 
-
-from bench.pde_datamodule import ChemotaxisDataModule
+from bench.pde_datamodule import ChemotaxisDataModule, ChemotaxisProblem
 from bench.pde_datamodule import ChemotaxisProblem
 from bench.pde_solver import PDESolver, PDEConfig
 from bench.pde_visualization import PDEVisualizer
@@ -43,97 +44,115 @@ from bench.pde_experience_buffer import PDEExperienceBuffer
 from bench.pde_llmsr_solver import LLMSRPDESolver
 
 
-# PDE Discovery Guide - NO PRIORS, LET LLM DISCOVER
 SUPPORTED_FORMS_GUIDE = """
 PDE DISCOVERY TASK:
+You will discover spatiotemporal PDEs that govern the evolution of a neutrophil cell density field g(x,y,t) given the chemoattractant field S(x,y). 
+The initial guess of the governing PDE is: ∂g/∂t = D·Δg - χ·∇·(g·∇S). This way, the cell move along the gradient of the chemoattractant field S.
+IMPORTANT PERFORMANCE NOTE:
 
-You will discover spatiotemporal PDEs that govern the evolution of a density field g(x,y,t) given the chemoattractant field S(x,y).
+All spatial gradients have been PRECOMPUTED outside this function. Do NOT recompute any gradients here.
+Use the provided gradient variables directly:
+
+dS_dx, dS_dy: spatial gradients of S along x and y, shape (H, W, T)
+dg_dx, dg_dy: spatial gradients of g along x and y, shape (H, W, T)
+lap_g: Laplacian of g over space (x,y) for each t, shape (H, W, T)
+div_flux:  ∇·(g·∇S), shape (H, W, T)
+
 
 INPUT DATA:
-- g(x,y,t): Density field observations over space and time (H, W, T)
-- S(x,y): Signal/chemoattractant field (given, static or time-varying) (H, W, T)
-- Spatial grid: (H×W) with spacing dx, dy
-- Time steps: T with step dt
-- params: Array of parameters, e.g. [p0, p1, p2, ...]
+
+g(x,y,t): Neutrophil cell density field observations over space and time (H, W, T)
+S(x,y): Signal/chemoattractant field (given, static or time-varying) (H, W, T)
+Spatial grid: (H×W) with spacing dx, dy
+Time steps: T with step dt
+params: Array of parameters, e.g. [p0, p1, p2, ...]
+Precomputed derivatives (MANDATORY to use, do not recompute):
+dS_dx, dS_dy, dg_dx, dg_dy, lap_g, div_flux   # all shapes (H, W, T)
+
+
 
 RETURN:
-- g_next: Updated density (H, W, T) at next time step (one-step roll out)
 
+g_next: Updated density (H, W, T) at next time step (one-step roll out)
 
 YOUR TASK:
-Generate COMPLETE Python code for a PDE update function using scipy/numpy operators.
-
+Generate COMPLETE Python code for a PDE update function using scipy/numpy operators WITHOUT recomputing gradients.
 FUNCTION SIGNATURE (MANDATORY):
-```python
 def pde_update(g: np.ndarray, S: np.ndarray, dx: float, dy: float, dt: float, params: np.ndarray) -> np.ndarray:
-    # At the beggining, you MUST give the symbolic form of this PDE in the commment (PDE FORM: ...), such as:
-    # PDE FORM: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
-    import numpy as np
-    import scipy.ndimage
 
+    # At the beginning, you MUST give the symbolic form of this PDE in the comment (PDE FORM: ...), such as:
+    # PDE FORM: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
     # Extract parameters
-    p0 = params[0]  # e.g., diffusion strength
-    p1 = params[1]  # e.g., advection/chemotaxis strength
+    p0 = params[0]  # e.g., diffusion strength (D)
+    p1 = params[1]  # e.g., chemotaxis strength (χ)
     # ... define as many as needed
 
-    # Use scipy/numpy operators (calculate only the necessary term using numpy or scipy):
-    # Laplacian : laplacian_g = scipy.ndimage.laplace(g, axes=(0,1)) / (dx**2)
-    # Derivatives: dg_dx = np.gradient(g, dx, axis=0), dg_dy = np.gradient(g, dy, axis=1)
+    # Use ONLY the provided precomputed derivatives:
+    # - lap_g: (H, W, T)
+    # - dS_dx, dS_dy: (H, W, T)
+    # - dg_dx, dg_dy: (H, W, T)
+    # - div_flux: (H, W, T)
+    # Shape safety: keep every intermediate as (H, W, T)
 
+   
 
-    # Compute dg/dt according to your PDE
-    # dg_dt = p0 * laplacian(g) + p1 * some_other_term + ...
+    # Compute dg/dt according to your PDE using precomputed derivatives:
+    # dg_dt = p0 * lap_g - p1 * div_flux + ...
 
     # Forward Euler: g_next = g + dt * dg_dt
 
     return g_next
-```
+
 SHAPE SAFETY RULES:
 
-1. g and S are 3D: (H, W, T) - Height × Width × Time
-2; ALL intermediate variables MUST be (H, W, T)
-3. dg_dx = np.gradient(g, dx, axis=0) return only (H, W), should be stacked to get the gradient vector
-4. Laplacian: scipy.ndimage.laplace(g) / (dx**2) → (H,W,T)
-5. Element-wise ops (*, +, -) require matching shapes
-6. Final g_next MUST be (H, W, T)
+g and S are 3D: (H, W, T) - Height × Width × Time
+ALL intermediate variables MUST be (H, W, T)
+Do NOT call np.gradient or scipy.ndimage.laplace on g or S; use dS_dx, dS_dy, dg_dx, dg_dy, lap_g
+Laplacian is already provided as lap_g: (H, W, T)
+Element-wise ops (*, +, -) require matching shapes
+Final g_next MUST be (H, W, T)
 
-OPERATORS YOU CAN USE (via scipy.ndimage):
-- Laplacian Δ: scipy.ndimage.laplace(g, axes=(0,1)) / (dx**2)
-- Derivatives ∇: dg_dx = np.gradient(g, dx, axis=0), dg_dy = np.gradient(g, dy, axis=1)
-- Divergence ∇·(flux): compute flux components then their gradients
-- Nonlinear terms: g², g³, g·S, exp, ln, etc.
-- ANY mathematical combination
+OPERATORS YOU CAN USE (without recomputing gradients):
 
-EXAMPLES OF POSSIBLE PDE FORMS:
-- Pure diffusion: ∂g/∂t = D·Δg
-- With reaction: ∂g/∂t = D·Δg + r·g
-- With advection: ∂g/∂t = D·Δg - v·∇g
-- With chemotaxis: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
-- Nonlinear: ∂g/∂t = D·Δg + r·g·(1-g)
-- Complex: ∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)
+Element-wise algebra on provided fields and gradients
+Divergence ∇·(flux): compute via finite differences on flux components (Fx, Fy) only
+Nonlinear terms: g², g³, g·S, exp, ln, etc.
+ANY mathematical combination of g or S
 
 NUMBER OF PARAMETERS:
-- You decide how many parameters your PDE needs
-- Specify as num_params when calling evaluate_pde_tool
-- More parameters = more flexible but harder to fit
-- Typical range: 1-5 parameters
+
+You decide how many parameters your PDE needs
+More parameters = more flexible but harder to fit
+Typical range: 1-5 parameters
 
 SCORING:
-- High R² (>0.9): Good fit to observations
-- Low mass error (<5%): Conserves total mass
-- Visual assessment: Spatial patterns match
+
+High R² (>0.9): Good fit to observations
+Low mass error (<5%): Conserves total mass
+Visual assessment: Spatial patterns match
 
 CRITICAL:
-- At the beggining, you MUST give the symbolic form of this PDE in the commment (PDE FORM: ...)
-- You can comment the intermediate variables' shape to avoid shape errors.
-- You should pay attention on the shape, the term that multiply/add/subtract should have the same shape
-- Generate COMPLETE pde_update() function code
-- Use scipy/numpy for all spatial operators (Laplacian, gradients, etc.)
-- Discover the governing equation from data
-- Be creative with parameter combinations
-- Try diverse PDE structures
-"""
 
+At the beginning, you MUST give the symbolic form of this PDE in the comment (PDE FORM: ...)
+If you want to calculate g·∇S, compute g * dS/dx and g * dS/dy separately using dS_dx, dS_dy
+Comment the intermediate variables' shape to avoid shape errors
+You MUST not involve more than 8 terms in the PDE, you should focus on moderately optimizing the best candidate, instead of involving too many terms.
+Keep shapes consistent for all element-wise operations
+Generate COMPLETE pde_update() function code
+Use ONLY the precomputed derivatives (dS_dx, dS_dy, dg_dx, dg_dy, lap_g) for spatial information
+Discover the governing equation from data
+Be creative with parameter combinations
+Try diverse PDE structures
+You MUST Start with the following form: ∂g/∂t = D·Δg - χ·∇·(g·∇(S))
+
+"""
+# EXAMPLES OF POSSIBLE PDE FORMS:
+# - Pure diffusion: ∂g/∂t = D·Δg
+# - With reaction: ∂g/∂t = D·Δg + r·g
+# - With advection: ∂g/∂t = D·Δg - v·∇g
+# - With chemotaxis: ∂g/∂t = D·Δg - χ·∇·(g·∇S)
+# - Nonlinear: ∂g/∂t = D·Δg + r·g·(1-g)
+# - Complex: ∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)
 
 # AsyncLLMClient - moved to module level so it can be pickled
 class AsyncLLMClient:
@@ -307,6 +326,12 @@ class PDEDiscoveryAutogenV04:
                 return json.dumps({'success': False, 'error': 'No problem loaded', 'score': 0.0})
 
             problem = self.current_problem
+            dx, dy, dt = problem.metadata.get('dx', 1.0), problem.metadata.get('dy', 1.0), problem.metadata.get('dt', 0.01)
+            S = problem.S
+            if len(S.shape) == 2:
+                S = S[..., None]
+                S = np.repeat(S, problem.g_observed.shape[2], axis=2)
+
 
             # Parameter bounds - generic for any number of params
             param_bounds = [(1e-6, 1e2) for _ in range(num_params)]
@@ -314,74 +339,87 @@ class PDEDiscoveryAutogenV04:
             # Directly use the provided code (agent generates it)
             # No intermediate LLM call - agent IS the LLM!
             code = pde_code
-
+            # print(f"Code: {code}")
             # Fit parameters and evaluate using the code
             from scipy import optimize
 
             # Fast objective: match dg/dt across all time steps (vectorized)
-            g_series = problem.g_observed
-            dt_meta = float(problem.metadata.get('dt', 0.01))
+            g = problem.g_observed
+            dg_dx, dg_dy = np.gradient(g, dx, axis=0), np.gradient(g, dy, axis=1)
+            dS_dx, dS_dy = np.gradient(S, dx, axis=0), np.gradient(S, dy, axis=1)
+            lap_g = scipy.ndimage.laplace(g, axes=(0,1)) / (dx**2)
+            div_flux = np.gradient(g * dS_dx, dx, axis=0) + np.gradient(g * dS_dy, dy, axis=1)
 
             last_obj_error: Optional[str] = None
+            namespace = {
+                'np': np,
+                'numpy': np,
+                'scipy': scipy,
+                'dg_dx': dg_dx, 
+                'dg_dy': dg_dy, 
+                'dS_dx': dS_dx,
+                'dS_dy': dS_dy, 
+                'lap_g': lap_g, 
+                'div_flux': div_flux,
+                '__builtins__': {
+                    'range': range, 'len': len, 'min': min, 'max': max,
+                    'abs': abs, 'sum': sum, 'enumerate': enumerate,
+                    'zip': zip, 'float': float, 'int': int,
+                    'True': True, 'False': False, 'None': None,
+                    '__import__': __import__,
+                },
+            }
+            exec(code, namespace)
+            pde_update = namespace['pde_update']
+
             def objective(params):
                 nonlocal last_obj_error
-                g_pred, dgdt_pred, success, error = self.llmsr_solver.evaluate_pde_dgdt(
-                    code, g_series, problem.S, params
-                )
-                if not success or dgdt_pred is None:
-                    last_obj_error = str(error)
-                    if getattr(self, 'verbose_debug', False):
-                        print(f"[Objective] dgdt eval failed: {last_obj_error}")
-                    return 1e10
-                dgdt_obs = (g_series[:, :, 1:] - g_series[:, :, :-1]) / dt_meta
-                return float(np.mean((dgdt_pred - dgdt_obs) ** 2))
+                g_next = pde_update(g, S, dx, dy, dt, params)
+                return float(np.mean((g_next[:, :, :-1] - g[:, :, 1:]) ** 2))
 
             # Initial guess: midpoint of bounds
             x0 = [(b[0] + b[1]) / 2 for b in param_bounds]
-            result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=param_bounds, )
+            objective_partial = lambda params: objective(params)
+            result = optimize.minimize(objective_partial, [0.01]*num_params, method='BFGS')
+            # result1 = optimize.minimize(objective_partial, [20.0]*num_params, method='BFGS', options={"maxiter": 100})
             fitted_params_list = result.x
             loss = result.fun
-            steps_roll = min(g_series.shape[2], self.eval_max_steps)
-            rollout_pred, rsuccess, rerror = self.llmsr_solver.evaluate_pde(
-                code, problem.g_init, problem.S, fitted_params_list, steps_roll
-            )
-
-            if rsuccess and rollout_pred is not None:
-                g_obs_roll = g_series[:, :, :steps_roll]
-                predicted_for_viz = rollout_pred
-            else:
-                if getattr(self, 'verbose_debug', False):
-                    print(f"[Rollout] evaluate_pde failed: {rerror}")
-                # Fallback to one-step (teacher-forced) sequence
-                g_obs_roll = g_series
-                # Make sure we have g_pred; recompute quickly if needed
-                if 'g_pred' not in locals() or g_pred is None:
-                    g_pred, _, _, _ = self.llmsr_solver.evaluate_pde_dgdt(
-                        code, g_series, problem.S, fitted_params_list
-                    )
-                predicted_for_viz = g_pred if g_pred is not None else g_series.copy()
+            steps_roll = min(g.shape[2], self.eval_max_steps)
+            rollout_pred = np.zeros_like(g)
+            rollout_pred[:, :, 0] = g[:, :, 0]
+            for t in range(1, steps_roll):
+                last_g = rollout_pred[:, :, t-1:t]
+                last_S = S[:, :, t-1:t]
+                namespace['dg_dx'] = np.gradient(last_g, dx, axis=0)
+                namespace['dg_dy'] = np.gradient(last_g, dy, axis=1)
+                namespace['dS_dx'] = np.gradient(last_S, dx, axis=0)
+                namespace['dS_dy'] = np.gradient(last_S, dy, axis=1)
+                namespace['lap_g'] = scipy.ndimage.laplace(last_g, axes=(0,1)) / (dx**2)
+                namespace['div_flux'] = np.gradient(last_g * namespace['dS_dx'], dx, axis=0) + np.gradient(last_g * namespace['dS_dy'], dy, axis=1)
+                exec(code, namespace)
+                rollout_pred[:, :, t:t+1] = pde_update(last_g, last_S, dx, dy, dt, fitted_params_list)
 
             # R² on rollout/fallback
-            ss_res = np.sum((g_obs_roll - predicted_for_viz) ** 2)
-            ss_tot = np.sum((g_obs_roll - g_obs_roll.mean()) ** 2)
+            ss_res = np.sum((g - rollout_pred) ** 2)
+            ss_tot = np.sum((g - g.mean()) ** 2)
             r2 = float(1 - ss_res / (ss_tot + 1e-10)) if ss_tot > 0 else 0.0
 
             # Mass error final frame
-            final_mass_pred = float(predicted_for_viz[:, :, -1].sum())
-            final_mass_obs = float(g_obs_roll[:, :, -1].sum())
+            final_mass_pred = float(rollout_pred[:, :, -1].sum())
+            final_mass_obs = float(g[:, :, -1].sum())
             mass_error = float(abs(final_mass_pred - final_mass_obs) / (final_mass_obs + 1e-8) * 100)
 
             fitted_params = {f'p{i}': val for i, val in enumerate(fitted_params_list)}
 
             # NMSE on rollout/fallback
-            nmse = float(self.solver.compute_spatiotemporal_loss(predicted_for_viz, g_obs_roll, 'nmse'))
+            nmse = float(self.solver.compute_spatiotemporal_loss(rollout_pred, g, 'nmse'))
 
             # Combined numerical score from R^2 (rollout) and MSE (dg/dt objective)
             # - r2_score in [0,1]
             # - mse_score = 1 / (1 + normalized_mse) where normalized by dg/dt energy
             r2_score = max(0.0, min(1.0, float(r2)))
             # Recompute observed dg/dt to scale MSE robustly
-            dgdt_obs_full = (g_series[:, :, 1:] - g_series[:, :, :-1]) / dt_meta
+            dgdt_obs_full = (g[:, :, 1:] - g[:, :, :-1]) / dt
             dgdt_scale = float(np.mean(dgdt_obs_full ** 2)) + 1e-8
             mse_norm = float(loss) / dgdt_scale
             mse_score = 1.0 / (1.0 + mse_norm)
@@ -400,11 +438,12 @@ class PDEDiscoveryAutogenV04:
 
             import re
             code_summary = re.search(r'# PDE FORM: (.*)', code).group(1).split('\n')[0].strip()
+            
             if code_summary is None:
                 code_summary = code
-
+            print(f"Evaluation PDE equation: {code_summary}")
             self.visualizer.create_critique_visualization(
-                g_obs_roll, predicted_for_viz,
+                g, rollout_pred,
                 code_summary, {'mse': loss, 'r2': r2, 'nmse': nmse, 'mass_error': mass_error},
                 save_path=str(viz_path)
             )
@@ -459,7 +498,7 @@ class PDEDiscoveryAutogenV04:
                 'code_preview': code[:2500] if len(code) > 2500 else code,
                 'PDE': code_summary,
                 'last_objective_error': last_obj_error,
-                'rollout_error': rerror if not rsuccess else None,
+                'rollout_error': None,
                 'critic': None,
                 'message': (
                     f"✓ Numerical={numerical_score:.2f} [AGENT-CODE]. R²={r2:.4f}, MSE={loss:.6f}, MassErr={mass_error:.2f}%.\n"
@@ -859,82 +898,62 @@ First round - PDE_Generator, please explore diverse PDE hypotheses:
 
 async def main_async():
     parser = argparse.ArgumentParser(description="PDE Discovery - AutoGen v0.4")
-    parser.add_argument('--dataset', type=str, default='logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5', help='Path to dataset (HDF5) or folder with npy pair')
-    parser.add_argument('--ca_path', type=str, default=None, help='Path to npy: chemoattractant (S); expects shape (T,H,W)')
-    parser.add_argument('--cell_path', type=str, default=None, help='Path to npy: cell density video (g); expects shape (T,H,W)')
-    parser.add_argument('--from_npy', action='store_true', help='Load from npy files instead of HDF5')
+    parser.add_argument('--dataset', type=str, default='devcell', help='Path to dataset (HDF5) or folder with npy pair')
     parser.add_argument('--fit_fixed', action='store_true', help='Bypass LLM; fit fixed PDE ∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)')
     parser.add_argument('--dt', type=float, default=1.0, help='Time step for npy data (default: 1.0)')
     parser.add_argument('--dx', type=float, default=1.0, help='Pixel size x (default: 1.0)')
     parser.add_argument('--dy', type=float, default=1.0, help='Pixel size y (default: 1.0)')
     parser.add_argument('--n_restarts', type=int, default=8, help='Number of random restarts for fixed PDE fitting')
-    parser.add_argument('--max_iter_fit', type=int, default=200, help='Max iterations for optimizer in fixed PDE fitting')
+    parser.add_argument('--max_iter_fit', type=int, default=50000, help='Max iterations for optimizer in fixed PDE fitting')
     parser.add_argument('--api_base', type=str, default='http://localhost:10005/v1', help='vLLM API URL')
     parser.add_argument('--api_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Model path')
-    parser.add_argument('--max_iterations', type=int, default=8000, help='Max iterations')
-    parser.add_argument('--samples_per_prompt', type=int, default=4, help='Samples per prompt')
+    parser.add_argument('--max_iterations', type=int, default=80000, help='Max iterations')
+    parser.add_argument('--samples_per_prompt', type=int, default=1, help='Samples per prompt')
     parser.add_argument('--output_dir', type=str, default='./logs/pde_discovery_autogen_v04', help='Output directory')
     parser.add_argument('--critic_model', type=str, default='/mnt/hdd_raid5/gaoch/Qwen3-VL-8B-Instruct', help='Vision model for Visual Critic (defaults to api_model)')
     args = parser.parse_args()
 
-    # Helper: loader for npy pair
-    def _load_npy_pair(ca_path: Optional[str], cell_path: Optional[str]) -> ChemotaxisProblem:
-        # If folder is given in --dataset, assume default filenames
-        if (ca_path is None or cell_path is None) and args.dataset and Path(args.dataset).is_dir():
-            folder = Path(args.dataset)
-            ca_default = folder / 'ca_video_continuous.npy'
-            cell_default = folder / 'cell_video_continuous.npy'
-            if ca_path is None:
-                ca_path = str(ca_default)
-            if cell_path is None:
-                cell_path = str(cell_default)
-
-        if ca_path is None or cell_path is None:
-            raise ValueError('Both --ca_path and --cell_path must be provided (or set --dataset to folder containing the default npy filenames).')
-
-        print(f"Loading npy pair: S={ca_path}, g={cell_path}")
-        S_np = np.load(ca_path)
-        g_np = np.load(cell_path)
-        if S_np.ndim != 3 or g_np.ndim != 3:
-            raise ValueError(f"Expected (T,H,W) arrays; got S{S_np.shape}, g{g_np.shape}")
-
-        # Convert (T,H,W) -> (H,W,T)
-        S = np.transpose(S_np, (1, 2, 0)).astype(np.float32)
-        g_series = np.transpose(g_np, (1, 2, 0)).astype(np.float32)
-
-        # Standardize by std only (per user request)
-        S_std = float(S.std())
-        g_std = float(g_series.std())
-        S = S / max(S_std, 1e-8)
-        g_series = g_series / max(g_std, 1e-8)
-
-        # Numerical safety for ln(S)
-        S = np.maximum(S, 1e-6)
+    if args.dataset == 'test':
+        print(f"Loading dataset: {args.dataset}")
+        dm = ChemotaxisDataModule(data_source="hdf5", data_path="logs/pde_discovery_complex/complex_chemotaxis_v2.hdf5")
+        problems = dm.load()
+        problem = list(problems.values())[0]
+        print(f"✓ Loaded (hdf5): {problem.g_observed.shape}")
+    elif args.dataset == 'devcell':
+        S_np = np.load("data/ca.npy").astype(np.float64)
+        g_np = np.load("data/cell.npy").astype(np.float64)
 
         metadata = {
             'dx': float(args.dx), 'dy': float(args.dy), 'dt': float(args.dt),
             'source': 'npy_pair',
-            'reference_pde': '∂g/∂t = D·Δg - χ·∇·(g·∇ln(S)) + r·g·(1-g/K)'
+            'reference_pde': '∂g/∂t = D·Δg - χ·∇·(g·∇ln(S))'
         }
         problem = ChemotaxisProblem(
-            g_init=g_series[:, :, 0].copy(),
-            S=S,
-            g_observed=g_series,
+            g_init=g_np[:, :, 0].copy(),
+            S=S_np,
+            g_observed=g_np,
             metadata=metadata,
             gt_equation=metadata['reference_pde']
         )
-        return problem
-
-    # Load dataset
-    if args.from_npy or args.ca_path or args.cell_path or (args.dataset and Path(args.dataset).is_dir()):
-        problem = _load_npy_pair(args.ca_path, args.cell_path)
-        print(f"✓ Loaded (npy): {problem.g_observed.shape}")
-    else:
+    elif args.dataset == 'tsinghua':
         print(f"Loading dataset: {args.dataset}")
-        dm = ChemotaxisDataModule(data_source="hdf5", data_path=args.dataset)
-        problems = dm.load()
-        problem = list(problems.values())[0]
-        print(f"✓ Loaded (hdf5): {problem.g_observed.shape}")
+        video = tifffile.imread("data/ca-cell.tif")
+        ca = video[:100, 0].transpose(1, 2, 0).astype(np.float64)
+        cell = video[:100, 1].transpose(1, 2, 0).astype(np.float64)
+
+        metadata = {
+            'dx': float(args.dx), 'dy': float(args.dy), 'dt': float(args.dt),
+            'source': 'npy_pair',
+            'reference_pde': '∂g/∂t = D·Δg - χ·∇·(g·∇ln(S))'
+        }
+        problem = ChemotaxisProblem(
+            g_init=cell[:, :, 0].copy().astype(np.float64),
+            S=ca,
+            g_observed=cell,
+            metadata=metadata,
+            gt_equation=metadata['reference_pde']
+        )
+
     print(f"  Ground Truth / Reference: {problem.gt_equation}")
 
     # If requested, run a fixed-PDE fitting using the provided reference form
@@ -955,51 +974,42 @@ async def main_async():
 
         # Utility: vectorized spatial ops on (H,W,T-1)
         def grad_x(a):
-            import scipy.ndimage as nd
-            return nd.sobel(a, axis=1) / (2.0 * dx)
+            return np.gradient(a, axis=0)
 
         def grad_y(a):
-            import scipy.ndimage as nd
-            return nd.sobel(a, axis=0) / (2.0 * dy)
+            return np.gradient(a, axis=1)
 
         def laplacian_xy(a):
             # Second derivatives only along x and y, vectorized over time dim
-            d2x = np.gradient(np.gradient(a, dx, axis=1), dx, axis=1)
-            d2y = np.gradient(np.gradient(a, dy, axis=0), dy, axis=0)
-            return d2x + d2y
+            import scipy.ndimage as nd
+            return nd.laplace(a, axes=(0,1)) / (dx**2)
 
         # Predicted dg/dt for all t using current state g_t and S_t (T-1 slices)
         def predict_dgdt(params):
-            D, chi, r, K = params
-            g_t = g_series[:, :, :-1]
-            S_t = S_series[:, :, :-1] if S_series.ndim == 3 else S_series
-            # Ensure broadcast if S is 2D
-            if S_series.ndim == 2:
-                S_t = np.repeat(S_series[:, :, None], g_t.shape[2], axis=2)
-            S_t = np.maximum(S_t, 1e-6)
+            D, chi = params
+            g_t = g_series[:, :, :-1].astype(np.float64)
+            S_t = S_series[:, :, :-1].astype(np.float64) if S_series.ndim == 3 else S_series.astype(np.float64)
+
 
             lap_g = laplacian_xy(g_t)
-            lnS = np.log(S_t)
-            grad_lnS_x = grad_x(lnS)
-            grad_lnS_y = grad_y(lnS)
+            grad_lnS_x = grad_x(S_t)
+            grad_lnS_y = grad_y(S_t)
             flux_x = g_t * grad_lnS_x
             flux_y = g_t * grad_lnS_y
             div_flux = grad_x(flux_x) + grad_y(flux_y)
-            reaction = r * g_t * (1.0 - g_t / (K + 1e-8))
-            return D * lap_g - chi * div_flux + reaction
+            return D * lap_g - chi * div_flux
 
         # Objective: MSE between predicted and observed dg/dt
         def objective(params):
-            D, chi, r, K = params
-            # Enforce positivity for D, chi, K; r allowed >= 0
-            if D < 0 or chi < 0 or K <= 0 or r < 0:
+            D, chi = params
+            # Enforce positivity for D, chi
+            if D < 0 or chi < 0:
                 return 1e12
             pred = predict_dgdt(params)
             return float(np.mean((pred - dgdt_obs) ** 2))
 
-        # Parameter bounds (coarse): D in [0, 5], chi in [0, 50], r in [0, 2], K in [0.25*max, 4*max]
-        g_max = float(np.max(g_series))
-        bounds = [(1e-6, 5.0), (0.0, 50.0), (0.0, 2.0), (max(1e-3, 0.25 * g_max), max(1.0, 4.0 * g_max))]
+        # Parameter bounds (coarse): D in [0, 5], chi in [0, 50]
+        bounds = [(1e-6, 50), (0.0, 50.0)]
 
         # Multi-start optimization to estimate parameter ranges
         from scipy.optimize import minimize
@@ -1010,22 +1020,18 @@ async def main_async():
             x0 = np.array([
                 rng.uniform(*bounds[0]),
                 rng.uniform(*bounds[1]),
-                rng.uniform(*bounds[2]),
-                rng.uniform(*bounds[3]),
             ], dtype=np.float64)
             res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, options={"maxiter": int(args.max_iter_fit)})
             trials.append(res.x.tolist() + [res.fun])
             if best_res is None or res.fun < best_res.fun:
                 best_res = res
-            print(f"  Restart {i+1}/{args.n_restarts}: loss={res.fun:.6e}, params=[D={res.x[0]:.4g}, chi={res.x[1]:.4g}, r={res.x[2]:.4g}, K={res.x[3]:.4g}]")
+            print(f"  Restart {i+1}/{args.n_restarts}: loss={res.fun:.6e}, params=[D={res.x[0]:.4g}, chi={res.x[1]:.4g}]")
 
         trials = np.array(trials)
-        D_list, chi_list, r_list, K_list, loss_list = trials.T
+        D_list, chi_list, loss_list = trials.T
         summary = {
             'D': {'min': float(D_list.min()), 'max': float(D_list.max()), 'mean': float(D_list.mean()), 'median': float(np.median(D_list))},
             'chi': {'min': float(chi_list.min()), 'max': float(chi_list.max()), 'mean': float(chi_list.mean()), 'median': float(np.median(chi_list))},
-            'r': {'min': float(r_list.min()), 'max': float(r_list.max()), 'mean': float(r_list.mean()), 'median': float(np.median(r_list))},
-            'K': {'min': float(K_list.min()), 'max': float(K_list.max()), 'mean': float(K_list.mean()), 'median': float(np.median(K_list))},
             'best_loss': float(best_res.fun),
         }
 
@@ -1040,16 +1046,16 @@ async def main_async():
         best_params = best_res.x
 
         def one_step(g2d, S2d, params):
-            D, chi, r, K = params
+            D, chi = params
             # 2D ops
             import scipy.ndimage as nd
             lap = nd.laplace(g2d) / (dx * dx)
-            lnS = np.log(np.maximum(S2d, 1e-6))
-            gx = nd.sobel(lnS, axis=1) / (2.0 * dx)
-            gy = nd.sobel(lnS, axis=0) / (2.0 * dy)
-            div = (nd.sobel(g2d * gx, axis=1) / (2.0 * dx)) + (nd.sobel(g2d * gy, axis=0) / (2.0 * dy))
-            react = r * g2d * (1.0 - g2d / (K + 1e-8))
-            dgdt = D * lap - chi * div + react
+            grad_lnS_x = grad_x(S2d)
+            grad_lnS_y = grad_y(S2d)
+            flux_x = g2d * grad_lnS_x
+            flux_y = g2d * grad_lnS_y
+            div_flux = grad_x(flux_x) + grad_y(flux_y)
+            dgdt = D * lap - chi * div_flux
             return np.maximum(g2d + dt * dgdt, 0.0)
 
         Tn = g_series.shape[2]
@@ -1071,7 +1077,7 @@ async def main_async():
         # Save parameter summary
         with open(out_dir / 'fit_summary.json', 'w') as f:
             json.dump({
-                'best_params': {'D': float(best_params[0]), 'chi': float(best_params[1]), 'r': float(best_params[2]), 'K': float(best_params[3])},
+                'best_params': {'D': float(best_params[0]), 'chi': float(best_params[1])},
                 'ranges': summary,
             }, f, indent=2)
         print(f"Saved parameter summary to: {out_dir / 'fit_summary.json'}")
